@@ -1,0 +1,71 @@
+#if !NETFRAMEWORK
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Octopus.Tentacle.Sandbox
+{
+    /// <summary>
+    /// Settings for running each script in an Azure Container Apps Sandbox, read from environment variables.
+    /// Setting TENTACLE_SCRIPT_RUNNER=AcaSandbox turns the feature on.
+    /// </summary>
+    public class AcaSandboxConfiguration
+    {
+        public const string RunnerVariable = "TENTACLE_SCRIPT_RUNNER";
+
+        public static bool IsEnabled => string.Equals(Environment.GetEnvironmentVariable(RunnerVariable), "AcaSandbox", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Data-plane endpoint, e.g. https://management.southcentralus.azuredevcompute.io</summary>
+        public string Endpoint { get; set; } = "";
+
+        /// <summary>/subscriptions/{sub}/resourceGroups/{rg}/sandboxGroups/{group}</summary>
+        public string SandboxGroupPath { get; set; } = "";
+
+        public string DiskImageId { get; set; } = "";
+        public string Cpu { get; set; } = "2000m";
+        public string Memory { get; set; } = "4096Mi";
+
+        /// <summary>Client id of the user-assigned identity used to call the sandbox API; empty uses the system identity.</summary>
+        public string? ManagedIdentityClientId { get; set; }
+
+        /// <summary>Coordinator environment variables passed through to each script.</summary>
+        public IReadOnlyList<string> PassThroughVariables { get; set; } = Array.Empty<string>();
+
+        /// <summary>Label stamped on every sandbox this coordinator creates, so its orphans can be found.</summary>
+        public string CoordinatorName { get; set; } = Environment.MachineName;
+
+        /// <summary>Packages uploaded to the coordinator within this window are copied into each sandbox.</summary>
+        public TimeSpan PackageWindow { get; set; } = TimeSpan.FromHours(2);
+
+        public bool KeepSandboxes { get; set; }
+        public TimeSpan StartTimeout { get; set; } = TimeSpan.FromMinutes(2);
+        public TimeSpan CancelGracePeriod { get; set; } = TimeSpan.FromSeconds(30);
+
+        public static AcaSandboxConfiguration FromEnvironment()
+        {
+            string Required(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
+                ? value
+                : throw new InvalidOperationException($"{name} must be set when {RunnerVariable}=AcaSandbox.");
+
+            string? Optional(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
+
+            return new AcaSandboxConfiguration
+            {
+                Endpoint = Required("ACA_SANDBOX_ENDPOINT"),
+                SandboxGroupPath = Required("ACA_SANDBOX_GROUP_PATH"),
+                DiskImageId = Required("ACA_SANDBOX_DISK_ID"),
+                Cpu = Optional("ACA_SANDBOX_CPU") ?? "2000m",
+                Memory = Optional("ACA_SANDBOX_MEMORY") ?? "4096Mi",
+                ManagedIdentityClientId = Optional("ACA_SANDBOX_MI_CLIENT_ID"),
+                PassThroughVariables = (Optional("ACA_SANDBOX_ENV_PASSTHROUGH") ?? "")
+                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(v => v.Trim())
+                    .ToList(),
+                CoordinatorName = Optional("ACA_SANDBOX_COORDINATOR_NAME") ?? Environment.MachineName,
+                PackageWindow = TimeSpan.FromMinutes(int.TryParse(Optional("ACA_SANDBOX_PACKAGE_WINDOW_MINUTES"), out var minutes) ? minutes : 120),
+                KeepSandboxes = string.Equals(Optional("ACA_SANDBOX_KEEP"), "true", StringComparison.OrdinalIgnoreCase)
+            };
+        }
+    }
+}
+#endif
