@@ -2,10 +2,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
 using Octopus.Tentacle.Contracts;
 using Octopus.Tentacle.Contracts.KubernetesScriptServiceV1;
 using Octopus.Tentacle.Contracts.ScriptServiceV2;
@@ -46,8 +44,6 @@ namespace Octopus.Tentacle.Sandbox
     [AcaSandboxKubernetesService(typeof(IKubernetesScriptServiceV1))]
     public class AcaSandboxKubernetesScriptService : IAsyncKubernetesScriptServiceV1
     {
-        static readonly Regex LongToken = new(@"[A-Za-z0-9+/=_\-]{24,}", RegexOptions.Compiled);
-
         readonly ScriptServiceV2 scripts;
         readonly AcaSandboxPodImages podImages;
         readonly ISystemLog log;
@@ -93,40 +89,17 @@ namespace Octopus.Tentacle.Sandbox
         static KubernetesScriptStatusResponseV1 Map(ScriptStatusResponseV2 response)
             => new(response.Ticket, response.State, response.ExitCode, response.Logs, response.NextLogSequence);
 
-        // Spike instrumentation: what the server sends on this contract, with secrets redacted.
+        // What the server asked for, without script bodies, arguments or credentials.
         void Record(StartKubernetesScriptCommandV1 command)
         {
-            var record = new
-            {
-                command.TaskId,
-                Ticket = command.ScriptTicket.TaskId,
-                command.IsRawScript,
-                command.Isolation,
-                command.IsolationMutexName,
-                command.ScriptIsolationMutexTimeout,
-                PodImage = command.PodImageConfiguration == null ? null : new
-                {
-                    command.PodImageConfiguration.Image,
-                    command.PodImageConfiguration.FeedUrl,
-                    command.PodImageConfiguration.FeedUsername,
-                    FeedPassword = command.PodImageConfiguration.FeedPassword is { Length: > 0 } p ? $"(set, {p.Length} chars)" : null
-                },
-                command.CalamariImageConfiguration,
-                command.ScriptPodServiceAccountName,
-                command.ScriptPodPlatform,
-                command.AuthContext,
-                Arguments = command.Arguments.Select(Redact).ToArray(),
-                AdditionalScripts = command.Scripts.ToDictionary(k => k.Key.ToString(), k => RedactBody(k.Value)),
-                Files = command.Files.Select(f => f.Name).ToArray(),
-                ScriptBody = RedactBody(command.ScriptBody)
-            };
-            var json = JsonConvert.SerializeObject(record, Formatting.None);
-            log.Info($"[k8s-contract] {json}");
+            var image = command.PodImageConfiguration;
+            var calamari = command.CalamariImageConfiguration;
+            log.Verbose($"Kubernetes script {command.ScriptTicket.TaskId} for {command.TaskId}: raw={command.IsRawScript}, mutex={command.IsolationMutexName}, "
+                + $"pod image={image?.Image ?? "(none)"}{(image?.FeedUrl is { } feed ? $" from {feed}" : "")}, "
+                + $"Calamari image={(calamari == null ? "(none)" : $"{calamari.Name} {calamari.Version}")}, "
+                + $"step={command.AuthContext?.StepSlug ?? "(none)"}, project={command.AuthContext?.ProjectSlug ?? "(none)"}, "
+                + $"environment={command.AuthContext?.EnvironmentSlug ?? "(none)"}, tenant={command.AuthContext?.TenantSlug ?? "(none)"}");
         }
-
-        static string RedactBody(string body) => string.Join("\n", body.Split('\n').Select(line => line.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0 ? "(line with a password redacted)" : Redact(line)));
-
-        static string Redact(string value) => LongToken.Replace(value, m => $"(redacted {m.Length} chars)");
     }
 }
 #endif

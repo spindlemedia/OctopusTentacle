@@ -54,17 +54,26 @@ namespace Octopus.Tentacle.Sandbox
             var created = await SendJsonAsync(HttpMethod.Put, $"{SandboxesUrl}?api-version={ApiVersion}", body, cancellationToken);
             var id = created.Value<string>("id") ?? throw new InvalidOperationException("Sandbox create returned no id: " + created);
 
-            var deadline = DateTimeOffset.UtcNow + config.StartTimeout;
-            var state = created.Value<string>("state");
-            while (!string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
+            try
             {
-                if (DateTimeOffset.UtcNow > deadline)
-                    throw new TimeoutException($"Sandbox {id} did not reach Running within {config.StartTimeout} (last state {state}).");
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
-                state = (await SendJsonAsync(HttpMethod.Get, $"{SandboxUrl(id)}?api-version={ApiVersion}", null, cancellationToken)).Value<string>("state");
-            }
+                var deadline = DateTimeOffset.UtcNow + config.StartTimeout;
+                var state = created.Value<string>("state");
+                while (!string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (DateTimeOffset.UtcNow > deadline)
+                        throw new TimeoutException($"Sandbox {id} did not reach Running within {config.StartTimeout} (last state {state}).");
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                    state = (await SendJsonAsync(HttpMethod.Get, $"{SandboxUrl(id)}?api-version={ApiVersion}", null, cancellationToken)).Value<string>("state");
+                }
 
-            return id;
+                return id;
+            }
+            catch
+            {
+                // The caller never learns the id of a sandbox that did not start, so nothing else would delete it.
+                try { await DeleteAsync(id, CancellationToken.None); } catch { /* the orphan cleaner retries on the next start */ }
+                throw;
+            }
         }
 
         public async Task DeleteAsync(string id, CancellationToken cancellationToken)

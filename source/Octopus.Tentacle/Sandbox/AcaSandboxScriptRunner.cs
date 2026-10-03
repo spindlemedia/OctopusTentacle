@@ -41,7 +41,8 @@ namespace Octopus.Tentacle.Sandbox
         readonly IHomeDirectoryProvider home;
         readonly AcaSandboxPodImages podImages;
         readonly ISystemLog log;
-        int orphansCleaned;
+        readonly object orphanCleanLock = new();
+        Task? orphanClean;
 
         public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, ISystemLog log)
         {
@@ -66,7 +67,7 @@ namespace Octopus.Tentacle.Sandbox
             var homeDirectory = Path.GetFullPath(home.HomeDirectory ?? throw new InvalidOperationException("Tentacle home directory is not set."));
             void Verbose(string message) => writer.WriteOutput(ProcessOutputSource.Debug, message);
 
-            await CleanOrphansOnceAsync(cancellationToken);
+            await CleanOrphansOnceAsync().WaitAsync(cancellationToken);
 
             var imagePull = ContainerImagePull.TryParse(workspace.BootstrapScriptFilePath);
             if (imagePull != null)
@@ -124,13 +125,28 @@ namespace Octopus.Tentacle.Sandbox
                 var staged = await StageInAsync(sandboxId, workspace, referenced, mounts.Values.ToList(), cancellationToken);
                 Verbose($"Copied {staged.Files} files ({staged.Bytes / 1024.0 / 1024.0:F1} MB) into the sandbox in {clock.Elapsed.TotalSeconds:F1} s");
 
+                int exitCode;
                 clock.Restart();
-                var exitCode = await RunScriptAsync(sandboxId, workspace, shellPath, homeDirectory, container?.Environment, environmentVariables, writer, cancellationToken);
-                Verbose($"Script exited with code {exitCode} after {clock.Elapsed.TotalSeconds:F1} s");
-
-                clock.Restart();
-                var returned = await StageOutAsync(sandboxId, homeDirectory, mounts.Values.ToList(), CancellationToken.None);
-                Verbose($"Copied {returned} new or changed files back from the sandbox in {clock.Elapsed.TotalSeconds:F1} s");
+                try
+                {
+                    exitCode = await RunScriptAsync(sandboxId, workspace, shellPath, homeDirectory, container?.Environment, environmentVariables, writer, cancellationToken);
+                    Verbose($"Script exited with code {exitCode} after {clock.Elapsed.TotalSeconds:F1} s");
+                }
+                finally
+                {
+                    // Also after a cancel: files the script wrote before it stopped still belong on the coordinator.
+                    clock.Restart();
+                    try
+                    {
+                        var returned = await StageOutAsync(sandboxId, homeDirectory, workspace.WorkingDirectory, mounts.Values.ToList(), CancellationToken.None);
+                        Verbose($"Copied {returned} new or changed files back from the sandbox in {clock.Elapsed.TotalSeconds:F1} s");
+                    }
+                    catch (Exception ex)
+                    {
+                        // The script's own result stands; what it changed elsewhere (a database) has already happened.
+                        writer.WriteOutput(ProcessOutputSource.StdErr, $"Could not copy changed files back from sandbox {sandboxId}: {ex.Message}");
+                    }
+                }
 
                 cancellationToken.ThrowIfCancellationRequested();
                 return exitCode;
@@ -173,10 +189,10 @@ namespace Octopus.Tentacle.Sandbox
                 return mounts;
 
             var toolsRoot = Path.Combine(homeDirectory, "Tools");
-            var toolDirectories = referenced
-                .Where(p => Directory.Exists(p) && p.StartsWith(toolsRoot + "/", StringComparison.Ordinal) && File.Exists(Path.Combine(p, "Success.txt")))
-                .ToList();
-            if (toolDirectories.Count > 0)
+            var toolPaths = referenced.Where(p => p.StartsWith(toolsRoot + "/", StringComparison.Ordinal)).ToList();
+            var toolDirectories = toolPaths.Where(IsCompleteToolDirectory).ToList();
+            // The mount hides the whole Tools folder, so a referenced path that cannot be uploaded whole means copying instead.
+            if (toolPaths.Count > 0 && toolDirectories.Count == toolPaths.Count)
             {
                 var allInBlob = true;
                 foreach (var directory in toolDirectories)
@@ -330,7 +346,16 @@ namespace Octopus.Tentacle.Sandbox
                 if (age <= config.PackageWindow)
                     recent.Add(file);
                 else if (age > TimeSpan.FromDays(1))
-                    File.Delete(file);
+                {
+                    try
+                    {
+                        File.Delete(file);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        log.Verbose($"Could not prune old package {file}: {ex.Message}");
+                    }
+                }
             }
             return recent;
         }
@@ -360,8 +385,8 @@ namespace Octopus.Tentacle.Sandbox
             foreach (var pair in environmentVariables)
                 environment[pair.Key] = pair.Value;
 
-            var stdout = new LineSplitter(line => OnLineAsync(sandboxId, ProcessOutputSource.StdOut, line, writer));
-            var stderr = new LineSplitter(line => OnLineAsync(sandboxId, ProcessOutputSource.StdErr, line, writer));
+            var stdout = new LineSplitter(line => OnLineAsync(sandboxId, workspace.WorkingDirectory, ProcessOutputSource.StdOut, line, writer));
+            var stderr = new LineSplitter(line => OnLineAsync(sandboxId, workspace.WorkingDirectory, ProcessOutputSource.StdErr, line, writer));
 
             // The exec socket must stay open while the script runs: dropping it kills the process with SIGKILL.
             // Cancellation therefore sends SIGTERM (the bootstrap traps it and stops Calamari), and only drops
@@ -441,28 +466,87 @@ namespace Octopus.Tentacle.Sandbox
             return environment;
         }
 
-        async Task OnLineAsync(string sandboxId, ProcessOutputSource source, string line, IScriptLogWriter writer)
+        async Task OnLineAsync(string sandboxId, string workingDirectory, ProcessOutputSource source, string line, IScriptLogWriter writer)
         {
             var artifact = CreateArtifactPattern.Match(line);
             if (artifact.Success)
             {
                 var path = DecodeServiceMessageValue(artifact.Groups[1].Value);
-                try
+                if (!IsArtifactPathAllowed(path, workingDirectory, Path.GetTempPath()))
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                    await using var file = File.Create(path);
-                    await client.DownloadFileAsync(sandboxId, path, file, CancellationToken.None);
+                    writer.WriteOutput(ProcessOutputSource.StdErr, $"Not copying artifact {path} back from sandbox {sandboxId}: only the script's work folder and the temp folder are allowed.");
                 }
-                catch (Exception ex)
+                else
                 {
-                    writer.WriteOutput(ProcessOutputSource.StdErr, $"Could not copy artifact {path} back from sandbox {sandboxId}: {ex.Message}");
+                    var target = NormalizeUnixPath(path);
+                    var download = target + ".sandbox-download";
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                        await using (var file = File.Create(download))
+                        {
+                            await client.DownloadFileAsync(sandboxId, target, file, CancellationToken.None);
+                        }
+                        File.Move(download, target, overwrite: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        File.Delete(download);
+                        writer.WriteOutput(ProcessOutputSource.StdErr, $"Could not copy artifact {path} back from sandbox {sandboxId}: {ex.Message}");
+                    }
                 }
             }
 
             writer.WriteOutput(source, line);
         }
 
-        async Task<int> StageOutAsync(string sandboxId, string homeDirectory, List<string> mountedRoots, CancellationToken cancellationToken)
+        /// <summary>Artifacts are taken only from the script's own work folder or the temp folder.</summary>
+        internal static bool IsArtifactPathAllowed(string path, string workingDirectory, string tempDirectory)
+        {
+            if (!path.StartsWith("/", StringComparison.Ordinal))
+                return false;
+            var full = NormalizeUnixPath(path);
+            return IsUnder(full, workingDirectory) || IsUnder(full, tempDirectory);
+        }
+
+        /// <summary>
+        /// What a sandbox may write back into the coordinator's home: this script's work folder, tools, packages and
+        /// Calamari's journals. Never the Tentacle's configuration, certificates or logs.
+        /// </summary>
+        internal static bool IsCopyBackAllowed(string path, string homeDirectory, string workingDirectory)
+        {
+            var full = NormalizeUnixPath(path);
+            var home = homeDirectory.TrimEnd('/');
+            if (IsUnder(full, workingDirectory) || IsUnder(full, home + "/Tools") || IsUnder(full, home + "/Files"))
+                return true;
+            return full == home + "/DeploymentJournal.xml" || full == home + "/PackageRetentionJournal.json";
+        }
+
+        /// <summary>Resolves "." and ".." in an absolute sandbox path, the same way on any host.</summary>
+        internal static string NormalizeUnixPath(string path)
+        {
+            var parts = new List<string>();
+            foreach (var part in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (part == "..")
+                {
+                    if (parts.Count > 0)
+                        parts.RemoveAt(parts.Count - 1);
+                }
+                else if (part != ".")
+                {
+                    parts.Add(part);
+                }
+            }
+            return "/" + string.Join("/", parts);
+        }
+
+        static bool IsUnder(string fullPath, string directory)
+            => fullPath.StartsWith(directory.TrimEnd('/') + "/", StringComparison.Ordinal);
+
+        static bool IsCompleteToolDirectory(string path) => Directory.Exists(path) && File.Exists(Path.Combine(path, "Success.txt"));
+
+        async Task<int> StageOutAsync(string sandboxId, string homeDirectory, string workingDirectory, List<string> mountedRoots, CancellationToken cancellationToken)
         {
             // Read-only mounts never change; pruning them also avoids listing Blob.
             var prune = string.Concat(mountedRoots.Select(root => $"-path {Quote(root)} -prune -o "));
@@ -487,14 +571,13 @@ namespace Octopus.Tentacle.Sandbox
                 await using var input = File.OpenRead(archive);
                 await using var gzip = new GZipStream(input, CompressionMode.Decompress);
                 using var tar = new TarReader(gzip);
-                var root = homeDirectory.TrimEnd('/') + "/";
                 while (await tar.GetNextEntryAsync(cancellationToken: cancellationToken) is { } entry)
                 {
                     if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile))
                         continue;
 
-                    var destination = Path.GetFullPath("/" + entry.Name.TrimStart('/'));
-                    if (!destination.StartsWith(root, StringComparison.Ordinal) || LocalOnlyWorkspaceFiles.Contains(Path.GetFileName(destination)))
+                    var destination = NormalizeUnixPath("/" + entry.Name);
+                    if (!IsCopyBackAllowed(destination, homeDirectory, workingDirectory) || LocalOnlyWorkspaceFiles.Contains(Path.GetFileName(destination)))
                         continue;
 
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -509,12 +592,18 @@ namespace Octopus.Tentacle.Sandbox
             }
         }
 
-        async Task CleanOrphansOnceAsync(CancellationToken cancellationToken)
+        // Sandboxes left behind by an earlier run of this coordinator (crash or restart) are deleted once at start-up.
+        // Every script waits for that clean, so it cannot delete a sandbox a concurrent script has just created.
+        Task CleanOrphansOnceAsync()
         {
-            // Sandboxes left behind by an earlier run of this coordinator (crash or restart) are deleted once at start-up.
-            if (config.KeepSandboxes || Interlocked.Exchange(ref orphansCleaned, 1) == 1)
-                return;
+            if (config.KeepSandboxes)
+                return Task.CompletedTask;
+            lock (orphanCleanLock)
+                return orphanClean ??= CleanOrphansAsync(CancellationToken.None);
+        }
 
+        async Task CleanOrphansAsync(CancellationToken cancellationToken)
+        {
             try
             {
                 foreach (var sandbox in await client.ListAsync(cancellationToken))
@@ -553,11 +642,14 @@ namespace Octopus.Tentacle.Sandbox
         /// The bootstrap of an execution-container step wraps Calamari in a multi-line
         /// <c>docker run --entrypoint='' --rm \ ... image \</c> (one argument per line) followed by the usual Calamari line.
         /// </summary>
-        static class ContainerStep
+        internal static class ContainerStep
         {
             static readonly Regex DockerRun = new(@"^docker run [^\n]*\\\n(?:[^\n]*\\\n)*", RegexOptions.Multiline);
 
-            static readonly Regex EnvArgument = new(@"--env\s+[""']?([A-Za-z_][A-Za-z0-9_]*)=([^\s""']*)[""']?");
+            static readonly Regex EnvArgument = new(@"--env\s+(?:""(?<name>[A-Za-z_]\w*)=(?<value>[^""]*)""|'(?<name>[A-Za-z_]\w*)=(?<value>[^']*)'|(?<name>[A-Za-z_]\w*)=(?<value>\S*))");
+
+            internal static Dictionary<string, string> ParseEnvironment(string dockerRun)
+                => EnvArgument.Matches(dockerRun).ToDictionary(m => m.Groups["name"].Value, m => m.Groups["value"].Value);
 
             /// <summary>
             /// Removes the docker run wrapper from the bootstrap and returns the image plus only the variables docker run
@@ -574,16 +666,16 @@ namespace Octopus.Tentacle.Sandbox
 
                 var lines = match.Value.Split('\n', StringSplitOptions.RemoveEmptyEntries);
                 var image = lines[^1].TrimEnd('\\').Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
-                var environment = EnvArgument.Matches(match.Value).ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value);
+                var environment = ParseEnvironment(match.Value);
                 File.WriteAllText(bootstrapPath, text.Remove(match.Index, match.Length));
                 return new ContainerRun(image, environment);
             }
         }
 
-        record ContainerRun(string Image, IReadOnlyDictionary<string, string> Environment);
+        internal record ContainerRun(string Image, IReadOnlyDictionary<string, string> Environment);
 
         /// <summary>A Calamari download-and-register-package call for a Docker feed, read from the bootstrap script.</summary>
-        class ContainerImagePull
+        internal class ContainerImagePull
         {
             public string Image { get; private init; } = "";
             public string? Username { get; private init; }
@@ -605,12 +697,16 @@ namespace Octopus.Tentacle.Sandbox
 
                 var packageId = Arg("packageId") ?? throw new InvalidOperationException("download-and-register-package without -packageId");
                 var version = Arg("packageVersion") ?? throw new InvalidOperationException("download-and-register-package without -packageVersion");
-                var host = new Uri(Arg("feedUri") ?? "https://index.docker.io").Host;
-                var image = host is "index.docker.io" or "registry-1.docker.io" or "docker.io"
-                    ? $"docker.io/{(packageId.Contains('/') ? packageId : "library/" + packageId)}:{version}"
-                    : $"{host}/{packageId}:{version}";
+                return new ContainerImagePull { Image = ImageName(Arg("feedUri"), packageId, version), Username = Arg("feedUsername"), Password = Arg("feedPassword") };
+            }
 
-                return new ContainerImagePull { Image = image, Username = Arg("feedUsername"), Password = Arg("feedPassword") };
+            internal static string ImageName(string? feedUri, string packageId, string version)
+            {
+                // Authority keeps a non-default port (registry.example:5000).
+                var registry = new Uri(feedUri ?? "https://index.docker.io").Authority;
+                return registry is "index.docker.io" or "registry-1.docker.io" or "docker.io"
+                    ? $"docker.io/{(packageId.Contains('/') ? packageId : "library/" + packageId)}:{version}"
+                    : $"{registry}/{packageId}:{version}";
             }
         }
 
