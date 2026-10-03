@@ -35,14 +35,17 @@ namespace Octopus.Tentacle.Sandbox
 
         string SandboxesUrl => $"{config.Endpoint.TrimEnd('/')}{config.SandboxGroupPath}/sandboxes";
         string SandboxUrl(string id) => $"{SandboxesUrl}/{id}";
+        string SnapshotsUrl => $"{config.Endpoint.TrimEnd('/')}{config.SandboxGroupPath}/snapshots";
 
-        public async Task<string> CreateAsync(IDictionary<string, string> labels, string? diskImageId, IReadOnlyDictionary<string, string> readOnlyMounts, CancellationToken cancellationToken)
+        /// <param name="snapshotId">Start from this snapshot instead: it fixes cpu and memory, and Blob volumes cannot be attached.</param>
+        public async Task<string> CreateAsync(IDictionary<string, string> labels, string? diskImageId, IReadOnlyDictionary<string, string> readOnlyMounts, CancellationToken cancellationToken, string? snapshotId = null)
         {
             var body = new JObject
             {
                 ["labels"] = JObject.FromObject(labels),
-                ["resources"] = new JObject { ["cpu"] = config.Cpu, ["memory"] = config.Memory },
-                ["sourcesRef"] = new JObject { ["diskImage"] = new JObject { ["id"] = diskImageId ?? config.DiskImageId } },
+                ["sourcesRef"] = snapshotId != null
+                    ? new JObject { ["snapshot"] = new JObject { ["id"] = snapshotId } }
+                    : new JObject { ["diskImage"] = new JObject { ["id"] = diskImageId ?? config.DiskImageId } },
                 // A sandbox orphaned by a coordinator crash goes idle once its script is killed, so the service
                 // suspends and then deletes it. A running exec counts as activity, however quiet the script is.
                 ["lifecycle"] = new JObject
@@ -51,6 +54,8 @@ namespace Octopus.Tentacle.Sandbox
                     ["autoDeletePolicy"] = new JObject { ["enabled"] = !config.KeepSandboxes, ["deleteIntervalInSeconds"] = 60 }
                 }
             };
+            if (snapshotId == null)
+                body["resources"] = new JObject { ["cpu"] = config.Cpu, ["memory"] = config.Memory };
             if (readOnlyMounts.Count > 0)
                 body["volumes"] = new JArray(readOnlyMounts.Select(m => new JObject { ["volumeName"] = m.Key, ["mountpoint"] = m.Value, ["readOnly"] = true }));
 
@@ -89,6 +94,18 @@ namespace Octopus.Tentacle.Sandbox
 
         public Task<IReadOnlyList<JObject>> ListAsync(CancellationToken cancellationToken)
             => GetListAsync($"{SandboxesUrl}?api-version={ApiVersion}", cancellationToken);
+
+        public async Task<string> CreateSnapshotAsync(string sandboxId, IDictionary<string, string> labels, CancellationToken cancellationToken)
+        {
+            var created = await SendJsonAsync(HttpMethod.Post, $"{SandboxUrl(sandboxId)}/snapshot?api-version={ApiVersion}", new JObject { ["labels"] = JObject.FromObject(labels) }, cancellationToken);
+            return created.Value<string>("id") ?? throw new InvalidOperationException("Snapshot create returned no id: " + created);
+        }
+
+        public Task<IReadOnlyList<JObject>> ListSnapshotsAsync(CancellationToken cancellationToken)
+            => GetListAsync($"{SnapshotsUrl}?api-version={ApiVersion}", cancellationToken);
+
+        public Task DeleteSnapshotAsync(string id, CancellationToken cancellationToken)
+            => SendJsonAsync(HttpMethod.Delete, $"{SnapshotsUrl}/{id}?api-version={ApiVersion}", null, cancellationToken);
 
         // List endpoints have returned both a bare array and {"value": [...]}.
         async Task<IReadOnlyList<JObject>> GetListAsync(string url, CancellationToken cancellationToken)

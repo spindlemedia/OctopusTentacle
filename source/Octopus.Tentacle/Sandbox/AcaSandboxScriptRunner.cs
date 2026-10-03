@@ -40,10 +40,12 @@ namespace Octopus.Tentacle.Sandbox
         readonly AcaSandboxBlobStore blobs;
         readonly IHomeDirectoryProvider home;
         readonly AcaSandboxPodImages podImages;
+        readonly AcaSandboxToolSnapshots toolSnapshots;
         readonly ISystemLog log;
 
-        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, ISystemLog log)
+        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, AcaSandboxToolSnapshots toolSnapshots, ISystemLog log)
         {
+            this.toolSnapshots = toolSnapshots;
             this.config = config;
             this.client = client;
             this.blobs = blobs;
@@ -102,7 +104,17 @@ namespace Octopus.Tentacle.Sandbox
                 .Concat(RecentlyUploadedPackages(homeDirectory))
                 .Distinct()
                 .ToList();
-            var mounts = await PlanMountsAsync(workspace, homeDirectory, referenced, Verbose, cancellationToken);
+            var toolsRoot = Path.Combine(homeDirectory, "Tools");
+            var toolPaths = referenced.Where(p => p.StartsWith(toolsRoot + "/", StringComparison.Ordinal)).ToList();
+            var snapshotId = toolPaths.Count > 0 && toolPaths.All(IsCompleteToolDirectory)
+                ? toolSnapshots.TryGet(diskImageId ?? config.DiskImageId, toolPaths)
+                : null;
+            // A sandbox started from a snapshot cannot mount Blob, so packages are copied in instead.
+            var mounts = snapshotId == null
+                ? await PlanMountsAsync(workspace, homeDirectory, referenced, Verbose, cancellationToken)
+                : new Dictionary<string, string>();
+            if (snapshotId != null)
+                Verbose($"Starting from snapshot {snapshotId}, which has {string.Join(", ", toolPaths.Select(p => Path.GetRelativePath(toolsRoot, p)))} on local disk");
             if (mounts.Count > 0)
                 Verbose($"Mounting {string.Join(", ", mounts.Values)} read-only from Blob (prepared in {clock.Elapsed.TotalSeconds:F1} s)");
 
@@ -112,7 +124,7 @@ namespace Octopus.Tentacle.Sandbox
                 ["octopus-coordinator"] = config.CoordinatorName,
                 ["octopus-ticket"] = workspace.ScriptTicket.TaskId,
                 ["octopus-task"] = taskId
-            }, diskImageId, mounts, cancellationToken);
+            }, diskImageId, mounts, cancellationToken, snapshotId);
             Verbose($"Sandbox {sandboxId} running after {clock.Elapsed.TotalSeconds:F1} s");
 
             try

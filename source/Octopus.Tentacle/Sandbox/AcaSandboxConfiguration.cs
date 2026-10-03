@@ -53,6 +53,9 @@ namespace Octopus.Tentacle.Sandbox
         public string FilesVolume { get; set; } = "octopus-files";
 
         public bool KeepSandboxes { get; set; }
+
+        /// <summary>Start scripts from a snapshot with their tool folders on local disk (ACA_SANDBOX_TOOL_SNAPSHOTS=false turns it off).</summary>
+        public bool ToolSnapshots { get; set; } = true;
         public TimeSpan StartTimeout { get; set; } = TimeSpan.FromMinutes(2);
         public TimeSpan CancelGracePeriod { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -84,7 +87,8 @@ namespace Octopus.Tentacle.Sandbox
                 ToolsVolume = Optional("ACA_SANDBOX_TOOLS_VOLUME") ?? "octopus-tools",
                 FilesContainer = Optional("ACA_SANDBOX_FILES_CONTAINER") ?? "octopus-files",
                 FilesVolume = Optional("ACA_SANDBOX_FILES_VOLUME") ?? "octopus-files",
-                KeepSandboxes = string.Equals(Optional("ACA_SANDBOX_KEEP"), "true", StringComparison.OrdinalIgnoreCase)
+                KeepSandboxes = string.Equals(Optional("ACA_SANDBOX_KEEP"), "true", StringComparison.OrdinalIgnoreCase),
+                ToolSnapshots = !string.Equals(Optional("ACA_SANDBOX_TOOL_SNAPSHOTS"), "false", StringComparison.OrdinalIgnoreCase)
             };
         }
     }

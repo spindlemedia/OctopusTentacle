@@ -72,6 +72,15 @@ namespace Octopus.Tentacle.Tests.Sandbox
                 ["PATH_WITH_SPACE"] = "/opt/my tools"
             });
         }
+
+        [Test]
+        public void ToolSnapshotKeyIgnoresOrderAndTrailingSlashButNotTheDiskImage()
+        {
+            var a = AcaSandboxToolSnapshots.Key("disk-1", new[] { "/etc/octopus/Tools/A/1", "/etc/octopus/Tools/B/2/" });
+            AcaSandboxToolSnapshots.Key("disk-1", new[] { "/etc/octopus/Tools/B/2", "/etc/octopus/Tools/A/1" }).Should().Be(a);
+            AcaSandboxToolSnapshots.Key("disk-2", new[] { "/etc/octopus/Tools/A/1", "/etc/octopus/Tools/B/2" }).Should().NotBe(a);
+            AcaSandboxToolSnapshots.Key("disk-1", new[] { "/etc/octopus/Tools/A/1", "/etc/octopus/Tools/B/3" }).Should().NotBe(a);
+        }
     }
 }
 #endif
