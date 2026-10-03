@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -35,7 +36,7 @@ namespace Octopus.Tentacle.Sandbox
         string SandboxesUrl => $"{config.Endpoint.TrimEnd('/')}{config.SandboxGroupPath}/sandboxes";
         string SandboxUrl(string id) => $"{SandboxesUrl}/{id}";
 
-        public async Task<string> CreateAsync(IDictionary<string, string> labels, string? diskImageId, CancellationToken cancellationToken)
+        public async Task<string> CreateAsync(IDictionary<string, string> labels, string? diskImageId, IReadOnlyDictionary<string, string> readOnlyMounts, CancellationToken cancellationToken)
         {
             var body = new JObject
             {
@@ -47,6 +48,8 @@ namespace Octopus.Tentacle.Sandbox
                     ["autoSuspendPolicy"] = new JObject { ["enabled"] = false }
                 }
             };
+            if (readOnlyMounts.Count > 0)
+                body["volumes"] = new JArray(readOnlyMounts.Select(m => new JObject { ["volumeName"] = m.Key, ["mountpoint"] = m.Value, ["readOnly"] = true }));
 
             var created = await SendJsonAsync(HttpMethod.Put, $"{SandboxesUrl}?api-version={ApiVersion}", body, cancellationToken);
             var id = created.Value<string>("id") ?? throw new InvalidOperationException("Sandbox create returned no id: " + created);

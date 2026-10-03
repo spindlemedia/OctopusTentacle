@@ -37,6 +37,13 @@ namespace Octopus.Tentacle.Sandbox
         /// <summary>Packages uploaded to the coordinator within this window are copied into each sandbox.</summary>
         public TimeSpan PackageWindow { get; set; } = TimeSpan.FromHours(2);
 
+        /// <summary>Storage account whose containers sandboxes mount read-only (empty: copy everything in).</summary>
+        public string? StorageAccount { get; set; }
+        public string ToolsContainer { get; set; } = "octopus-tools";
+        public string ToolsVolume { get; set; } = "octopus-tools";
+        public string FilesContainer { get; set; } = "octopus-files";
+        public string FilesVolume { get; set; } = "octopus-files";
+
         public bool KeepSandboxes { get; set; }
         public TimeSpan StartTimeout { get; set; } = TimeSpan.FromMinutes(2);
         public TimeSpan CancelGracePeriod { get; set; } = TimeSpan.FromSeconds(30);
@@ -63,6 +70,11 @@ namespace Octopus.Tentacle.Sandbox
                     .ToList(),
                 CoordinatorName = Optional("ACA_SANDBOX_COORDINATOR_NAME") ?? Environment.MachineName,
                 PackageWindow = TimeSpan.FromMinutes(int.TryParse(Optional("ACA_SANDBOX_PACKAGE_WINDOW_MINUTES"), out var minutes) ? minutes : 120),
+                StorageAccount = Optional("ACA_SANDBOX_STORAGE_ACCOUNT"),
+                ToolsContainer = Optional("ACA_SANDBOX_TOOLS_CONTAINER") ?? "octopus-tools",
+                ToolsVolume = Optional("ACA_SANDBOX_TOOLS_VOLUME") ?? "octopus-tools",
+                FilesContainer = Optional("ACA_SANDBOX_FILES_CONTAINER") ?? "octopus-files",
+                FilesVolume = Optional("ACA_SANDBOX_FILES_VOLUME") ?? "octopus-files",
                 KeepSandboxes = string.Equals(Optional("ACA_SANDBOX_KEEP"), "true", StringComparison.OrdinalIgnoreCase)
             };
         }

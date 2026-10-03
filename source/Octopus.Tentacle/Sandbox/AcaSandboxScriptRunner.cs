@@ -37,14 +37,16 @@ namespace Octopus.Tentacle.Sandbox
 
         readonly AcaSandboxConfiguration config;
         readonly AcaSandboxClient client;
+        readonly AcaSandboxBlobStore blobs;
         readonly IHomeDirectoryProvider home;
         readonly ISystemLog log;
         int orphansCleaned;
 
-        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, IHomeDirectoryProvider home, ISystemLog log)
+        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, ISystemLog log)
         {
             this.config = config;
             this.client = client;
+            this.blobs = blobs;
             this.home = home;
             this.log = log;
         }
@@ -91,18 +93,27 @@ namespace Octopus.Tentacle.Sandbox
             }
 
             var clock = Stopwatch.StartNew();
+            var referenced = FindReferencedHomePaths(workspace, homeDirectory)
+                .Concat(RecentlyUploadedPackages(homeDirectory))
+                .Distinct()
+                .ToList();
+            var mounts = await PlanMountsAsync(workspace, homeDirectory, referenced, Verbose, cancellationToken);
+            if (mounts.Count > 0)
+                Verbose($"Mounting {string.Join(", ", mounts.Values)} read-only from Blob (prepared in {clock.Elapsed.TotalSeconds:F1} s)");
+
+            clock.Restart();
             var sandboxId = await client.CreateAsync(new Dictionary<string, string>
             {
                 ["octopus-coordinator"] = config.CoordinatorName,
                 ["octopus-ticket"] = workspace.ScriptTicket.TaskId,
                 ["octopus-task"] = taskId
-            }, diskImageId, cancellationToken);
+            }, diskImageId, mounts, cancellationToken);
             Verbose($"Sandbox {sandboxId} running after {clock.Elapsed.TotalSeconds:F1} s");
 
             try
             {
                 clock.Restart();
-                var staged = await StageInAsync(sandboxId, workspace, homeDirectory, taskId, cancellationToken);
+                var staged = await StageInAsync(sandboxId, workspace, referenced, mounts.Values.ToList(), cancellationToken);
                 Verbose($"Copied {staged.Files} files ({staged.Bytes / 1024.0 / 1024.0:F1} MB) into the sandbox in {clock.Elapsed.TotalSeconds:F1} s");
 
                 clock.Restart();
@@ -110,7 +121,7 @@ namespace Octopus.Tentacle.Sandbox
                 Verbose($"Script exited with code {exitCode} after {clock.Elapsed.TotalSeconds:F1} s");
 
                 clock.Restart();
-                var returned = await StageOutAsync(sandboxId, homeDirectory, CancellationToken.None);
+                var returned = await StageOutAsync(sandboxId, homeDirectory, mounts.Values.ToList(), CancellationToken.None);
                 Verbose($"Copied {returned} new or changed files back from the sandbox in {clock.Elapsed.TotalSeconds:F1} s");
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -138,18 +149,85 @@ namespace Octopus.Tentacle.Sandbox
             }
         }
 
-        async Task<(int Files, long Bytes)> StageInAsync(string sandboxId, IScriptWorkspace workspace, string homeDirectory, string taskId, CancellationToken cancellationToken)
+        // Calamari commands that write to the package cache cannot run with Files mounted read-only.
+        static readonly string[] PackageCacheCommands = { " clean-packages", " find-package", " apply-delta", " release-package-lock", " register-package", " download-and-register-package" };
+
+        /// <summary>
+        /// Decides which home folders the sandbox mounts read-only from Blob instead of receiving a copy: Tools when every
+        /// tool folder the script refers to is complete (Success.txt) and in Blob, uploading it once if only the
+        /// coordinator has it; Files when the script uses recently pushed packages and does not manage the package cache.
+        /// Returns volume name to mount path.
+        /// </summary>
+        async Task<Dictionary<string, string>> PlanMountsAsync(IScriptWorkspace workspace, string homeDirectory, List<string> referenced, Action<string> verbose, CancellationToken cancellationToken)
         {
+            var mounts = new Dictionary<string, string>();
+            if (!blobs.Enabled)
+                return mounts;
+
+            var toolsRoot = Path.Combine(homeDirectory, "Tools");
+            var toolDirectories = referenced
+                .Where(p => Directory.Exists(p) && p.StartsWith(toolsRoot + "/", StringComparison.Ordinal) && File.Exists(Path.Combine(p, "Success.txt")))
+                .ToList();
+            if (toolDirectories.Count > 0)
+            {
+                var allInBlob = true;
+                foreach (var directory in toolDirectories)
+                {
+                    var prefix = Path.GetRelativePath(toolsRoot, directory);
+                    try
+                    {
+                        if (!await blobs.ExistsAsync(config.ToolsContainer, prefix + "/Success.txt", cancellationToken))
+                        {
+                            var upload = Stopwatch.StartNew();
+                            await blobs.UploadDirectoryAsync(config.ToolsContainer, prefix, directory, "Success.txt", cancellationToken);
+                            verbose($"Uploaded {prefix} to Blob in {upload.Elapsed.TotalSeconds:F1} s");
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        verbose($"Could not put {prefix} in Blob, copying it instead: {ex.Message}");
+                        allInBlob = false;
+                    }
+                }
+                if (allInBlob)
+                    mounts[config.ToolsVolume] = toolsRoot;
+            }
+
+            var filesRoot = Path.Combine(homeDirectory, "Files");
+            var packages = referenced.Where(p => File.Exists(p) && p.StartsWith(filesRoot + "/", StringComparison.Ordinal)).ToList();
+            var bootstrap = File.Exists(workspace.BootstrapScriptFilePath) ? File.ReadAllText(workspace.BootstrapScriptFilePath) : "";
+            if (packages.Count > 0 && !PackageCacheCommands.Any(bootstrap.Contains))
+            {
+                try
+                {
+                    foreach (var package in packages)
+                    {
+                        var name = Path.GetRelativePath(filesRoot, package);
+                        if (!await blobs.ExistsAsync(config.FilesContainer, name, cancellationToken))
+                            await blobs.UploadFileAsync(config.FilesContainer, name, package, cancellationToken);
+                    }
+                    mounts[config.FilesVolume] = filesRoot;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    verbose($"Could not put packages in Blob, copying them instead: {ex.Message}");
+                }
+            }
+
+            return mounts;
+        }
+
+        async Task<(int Files, long Bytes)> StageInAsync(string sandboxId, IScriptWorkspace workspace, List<string> referenced, List<string> mountedRoots, CancellationToken cancellationToken)
+        {
+            bool Mounted(string path) => mountedRoots.Any(root => path.StartsWith(root + "/", StringComparison.Ordinal));
+
             var files = Directory.EnumerateFiles(workspace.WorkingDirectory, "*", SearchOption.AllDirectories)
                 .Where(f => !LocalOnlyWorkspaceFiles.Contains(Path.GetFileName(f)))
                 .ToList();
 
-            var referenced = FindReferencedHomePaths(workspace, homeDirectory)
-                .Concat(RecentlyUploadedPackages(homeDirectory))
-                .ToList();
-            files.AddRange(referenced.Where(File.Exists));
+            files.AddRange(referenced.Where(p => File.Exists(p) && !Mounted(p)));
 
-            var directories = referenced.Where(Directory.Exists).ToList();
+            var directories = referenced.Where(p => Directory.Exists(p) && !Mounted(p)).ToList();
             if (directories.Count > 0)
             {
                 // Directories (Calamari, tools) are usually baked into the disk image; copy only the missing ones.
@@ -350,10 +428,12 @@ namespace Octopus.Tentacle.Sandbox
             writer.WriteOutput(source, line);
         }
 
-        async Task<int> StageOutAsync(string sandboxId, string homeDirectory, CancellationToken cancellationToken)
+        async Task<int> StageOutAsync(string sandboxId, string homeDirectory, List<string> mountedRoots, CancellationToken cancellationToken)
         {
+            // Read-only mounts never change; pruning them also avoids listing Blob.
+            var prune = string.Concat(mountedRoots.Select(root => $"-path {Quote(root)} -prune -o "));
             var pack = await client.RunAsync(sandboxId,
-                $"cd / && find {Quote(homeDirectory)} -cnewer {StartMarkerPath} -type f -printf '%P\\n' | wc -l && find {Quote(homeDirectory)} -cnewer {StartMarkerPath} -type f -print0 | tar -czf {StageOutPath} --null -T - 2>/dev/null",
+                $"cd / && find {Quote(homeDirectory)} {prune}-cnewer {StartMarkerPath} -type f -printf '%P\\n' | wc -l && find {Quote(homeDirectory)} {prune}-cnewer {StartMarkerPath} -type f -print0 | tar -czf {StageOutPath} --null -T - 2>/dev/null",
                 cancellationToken);
             if (pack.ExitCode != 0)
                 throw new IOException($"Packing changed files in sandbox {sandboxId} failed ({pack.ExitCode}): {pack.StdErr}");
