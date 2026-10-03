@@ -41,8 +41,6 @@ namespace Octopus.Tentacle.Sandbox
         readonly IHomeDirectoryProvider home;
         readonly AcaSandboxPodImages podImages;
         readonly ISystemLog log;
-        readonly object orphanCleanLock = new();
-        Task? orphanClean;
 
         public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, ISystemLog log)
         {
@@ -66,8 +64,6 @@ namespace Octopus.Tentacle.Sandbox
         {
             var homeDirectory = Path.GetFullPath(home.HomeDirectory ?? throw new InvalidOperationException("Tentacle home directory is not set."));
             void Verbose(string message) => writer.WriteOutput(ProcessOutputSource.Debug, message);
-
-            await CleanOrphansOnceAsync().WaitAsync(cancellationToken);
 
             var imagePull = ContainerImagePull.TryParse(workspace.BootstrapScriptFilePath);
             if (imagePull != null)
@@ -169,7 +165,7 @@ namespace Octopus.Tentacle.Sandbox
             }
             catch (Exception ex)
             {
-                log.Warn(ex, $"Could not delete sandbox {sandboxId}; the orphan cleaner will retry on the next start.");
+                log.Warn(ex, $"Could not delete sandbox {sandboxId}; it is deleted after {config.IdleTimeout.TotalMinutes:F0} minutes idle.");
             }
         }
 
@@ -589,35 +585,6 @@ namespace Octopus.Tentacle.Sandbox
             finally
             {
                 File.Delete(archive);
-            }
-        }
-
-        // Sandboxes left behind by an earlier run of this coordinator (crash or restart) are deleted once at start-up.
-        // Every script waits for that clean, so it cannot delete a sandbox a concurrent script has just created.
-        Task CleanOrphansOnceAsync()
-        {
-            if (config.KeepSandboxes)
-                return Task.CompletedTask;
-            lock (orphanCleanLock)
-                return orphanClean ??= CleanOrphansAsync(CancellationToken.None);
-        }
-
-        async Task CleanOrphansAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                foreach (var sandbox in await client.ListAsync(cancellationToken))
-                {
-                    if (sandbox["labels"]?.Value<string>("octopus-coordinator") != config.CoordinatorName)
-                        continue;
-                    var id = sandbox.Value<string>("id")!;
-                    log.Info($"Deleting orphaned sandbox {id} from an earlier run of {config.CoordinatorName}");
-                    await client.DeleteAsync(id, cancellationToken);
-                }
-            }
-            catch (Exception ex)
-            {
-                log.Warn(ex, "Could not clean up orphaned sandboxes");
             }
         }
 

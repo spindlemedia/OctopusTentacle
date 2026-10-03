@@ -43,9 +43,12 @@ namespace Octopus.Tentacle.Sandbox
                 ["labels"] = JObject.FromObject(labels),
                 ["resources"] = new JObject { ["cpu"] = config.Cpu, ["memory"] = config.Memory },
                 ["sourcesRef"] = new JObject { ["diskImage"] = new JObject { ["id"] = diskImageId ?? config.DiskImageId } },
+                // A sandbox orphaned by a coordinator crash goes idle once its script is killed, so the service
+                // suspends and then deletes it. A running exec counts as activity, however quiet the script is.
                 ["lifecycle"] = new JObject
                 {
-                    ["autoSuspendPolicy"] = new JObject { ["enabled"] = false }
+                    ["autoSuspendPolicy"] = new JObject { ["enabled"] = !config.KeepSandboxes, ["interval"] = (int)config.IdleTimeout.TotalSeconds, ["mode"] = "Disk" },
+                    ["autoDeletePolicy"] = new JObject { ["enabled"] = !config.KeepSandboxes, ["deleteIntervalInSeconds"] = 60 }
                 }
             };
             if (readOnlyMounts.Count > 0)
@@ -71,7 +74,7 @@ namespace Octopus.Tentacle.Sandbox
             catch
             {
                 // The caller never learns the id of a sandbox that did not start, so nothing else would delete it.
-                try { await DeleteAsync(id, CancellationToken.None); } catch { /* the orphan cleaner retries on the next start */ }
+                try { await DeleteAsync(id, CancellationToken.None); } catch { /* best effort */ }
                 throw;
             }
         }

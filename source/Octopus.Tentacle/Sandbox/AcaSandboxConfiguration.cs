@@ -36,8 +36,11 @@ namespace Octopus.Tentacle.Sandbox
         /// <summary>Coordinator environment variables passed through to each script.</summary>
         public IReadOnlyList<string> PassThroughVariables { get; set; } = Array.Empty<string>();
 
-        /// <summary>Label stamped on every sandbox this coordinator creates, so its orphans can be found.</summary>
+        /// <summary>Label stamped on every sandbox this coordinator creates.</summary>
         public string CoordinatorName { get; set; } = Environment.MachineName;
+
+        /// <summary>A sandbox with no exec, shell, file or ingress activity for this long is suspended, then deleted.</summary>
+        public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
         /// <summary>Packages uploaded to the coordinator within this window are copied into each sandbox.</summary>
         public TimeSpan PackageWindow { get; set; } = TimeSpan.FromHours(2);
@@ -74,6 +77,7 @@ namespace Octopus.Tentacle.Sandbox
                     .Select(v => v.Trim())
                     .ToList(),
                 CoordinatorName = Optional("ACA_SANDBOX_COORDINATOR_NAME") ?? Environment.MachineName,
+                IdleTimeout = TimeSpan.FromSeconds(int.TryParse(Optional("ACA_SANDBOX_IDLE_SECONDS"), out var idleSeconds) ? idleSeconds : 600),
                 PackageWindow = TimeSpan.FromMinutes(int.TryParse(Optional("ACA_SANDBOX_PACKAGE_WINDOW_MINUTES"), out var minutes) ? minutes : 120),
                 StorageAccount = Optional("ACA_SANDBOX_STORAGE_ACCOUNT"),
                 ToolsContainer = Optional("ACA_SANDBOX_TOOLS_CONTAINER") ?? "octopus-tools",
