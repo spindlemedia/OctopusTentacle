@@ -116,13 +116,15 @@ namespace Octopus.Tentacle.Sandbox
                 command.ScriptPodPlatform,
                 command.AuthContext,
                 Arguments = command.Arguments.Select(Redact).ToArray(),
-                AdditionalScripts = command.Scripts.Keys.Select(k => k.ToString()).ToArray(),
+                AdditionalScripts = command.Scripts.ToDictionary(k => k.Key.ToString(), k => RedactBody(k.Value)),
                 Files = command.Files.Select(f => f.Name).ToArray(),
-                ScriptBody = string.Join("\n", command.ScriptBody.Split('\n').Select(line => line.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0 ? "(line with a password redacted)" : Redact(line)))
+                ScriptBody = RedactBody(command.ScriptBody)
             };
             var json = JsonConvert.SerializeObject(record, Formatting.None);
             log.Info($"[k8s-contract] {json}");
         }
+
+        static string RedactBody(string body) => string.Join("\n", body.Split('\n').Select(line => line.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0 ? "(line with a password redacted)" : Redact(line)));
 
         static string Redact(string value) => LongToken.Replace(value, m => $"(redacted {m.Length} chars)");
     }
