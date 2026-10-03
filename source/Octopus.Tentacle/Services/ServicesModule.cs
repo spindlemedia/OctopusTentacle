@@ -34,6 +34,12 @@ namespace Octopus.Tentacle.Services
             {
                 RegisterHalibutServices<KubernetesServiceAttribute>(builder, allTypes);
             }
+#if !NETFRAMEWORK
+            else if (Sandbox.AcaSandboxConfiguration.UsesKubernetesContract)
+            {
+                RegisterHalibutServices<Sandbox.AcaSandboxKubernetesServiceAttribute>(builder, allTypes);
+            }
+#endif
         }
 
         static void RegisterHalibutServices<T>(ContainerBuilder builder, IEnumerable<Type> allTypes) where T: Attribute, IServiceAttribute

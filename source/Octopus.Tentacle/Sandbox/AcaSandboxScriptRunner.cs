@@ -39,15 +39,17 @@ namespace Octopus.Tentacle.Sandbox
         readonly AcaSandboxClient client;
         readonly AcaSandboxBlobStore blobs;
         readonly IHomeDirectoryProvider home;
+        readonly AcaSandboxPodImages podImages;
         readonly ISystemLog log;
         int orphansCleaned;
 
-        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, ISystemLog log)
+        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, ISystemLog log)
         {
             this.config = config;
             this.client = client;
             this.blobs = blobs;
             this.home = home;
+            this.podImages = podImages;
             this.log = log;
         }
 
@@ -90,6 +92,12 @@ namespace Octopus.Tentacle.Sandbox
                 // Execution container step: run Calamari directly in a sandbox built from the step's image.
                 diskImageId = await client.EnsureDiskImageAsync(container.Image, null, null, Verbose, cancellationToken);
                 Verbose($"Execution container {container.Image} runs as sandbox disk image {diskImageId}");
+            }
+            else if (podImages.Get(workspace.ScriptTicket) is { } podImage && !IsAgentDefaultImage(podImage.Image!))
+            {
+                // Kubernetes contract: the pod image arrives as a typed field with its feed credentials.
+                diskImageId = await client.EnsureDiskImageAsync(podImage.Image!, podImage.FeedUsername, podImage.FeedPassword, Verbose, cancellationToken);
+                Verbose($"Pod image {podImage.Image} runs as sandbox disk image {diskImageId}");
             }
 
             var clock = Stopwatch.StartNew();
@@ -385,6 +393,9 @@ namespace Octopus.Tentacle.Sandbox
         }
 
         // A local script inherits the Tentacle process's own variables (TentacleHome, TentacleVersion, proxy settings, ...).
+        // The Kubernetes agent's own tools image stands for "no execution container": use the default disk image.
+        static bool IsAgentDefaultImage(string image) => image.Contains("kubernetes-agent-tools-base", StringComparison.OrdinalIgnoreCase);
+
         Dictionary<string, string> LocalScriptEnvironment(string homeDirectory)
         {
             var environment = new Dictionary<string, string>
@@ -398,6 +409,9 @@ namespace Octopus.Tentacle.Sandbox
                     environment[name] = (string?)variable.Value ?? "";
             }
             environment["TentacleHome"] = homeDirectory;
+            // A Kubernetes agent's script pod gets no deployment journal.
+            if (AcaSandboxConfiguration.UsesKubernetesContract)
+                environment.Remove("TentacleJournal");
             foreach (var name in config.PassThroughVariables)
             {
                 var value = Environment.GetEnvironmentVariable(name);

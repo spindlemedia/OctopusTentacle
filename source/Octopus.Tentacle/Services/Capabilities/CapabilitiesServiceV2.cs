@@ -18,7 +18,11 @@ namespace Octopus.Tentacle.Services.Capabilities
             await Task.CompletedTask;
 
             //the kubernetes agent only supports the kubernetes script services
-            if (KubernetesSupportDetection.IsRunningAsKubernetesAgent)
+            if (KubernetesSupportDetection.IsRunningAsKubernetesAgent
+#if !NETFRAMEWORK
+                || Sandbox.AcaSandboxConfiguration.UsesKubernetesContract
+#endif
+               )
             {
                 return new CapabilitiesResponseV2(new List<string> { nameof(IFileTransferService),  nameof(IKubernetesScriptServiceV1)  });
             }

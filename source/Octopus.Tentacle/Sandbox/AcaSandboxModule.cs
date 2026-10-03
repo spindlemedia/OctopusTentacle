@@ -18,6 +18,7 @@ namespace Octopus.Tentacle.Sandbox
             builder.RegisterType<AcaSandboxTokenProvider>().SingleInstance();
             builder.RegisterType<AcaSandboxClient>().SingleInstance();
             builder.RegisterType<AcaSandboxBlobStore>().SingleInstance();
+            builder.RegisterType<AcaSandboxPodImages>().SingleInstance();
             builder.RegisterType<AcaSandboxScriptRunner>().As<IScriptRunner>().SingleInstance();
         }
     }
