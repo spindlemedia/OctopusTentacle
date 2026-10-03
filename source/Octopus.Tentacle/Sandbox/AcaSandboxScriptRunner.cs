@@ -263,6 +263,8 @@ namespace Octopus.Tentacle.Sandbox
                     {
                         foreach (var file in files)
                             await tar.WriteEntryAsync(file, file.TrimStart('/'), cancellationToken);
+                        if (AcaSandboxConfiguration.UsesKubernetesContract)
+                            await WriteKubectlStubAsync(tar, cancellationToken);
                     }
                 }
 
@@ -392,10 +394,28 @@ namespace Octopus.Tentacle.Sandbox
             return exitCode;
         }
 
-        // A local script inherits the Tentacle process's own variables (TentacleHome, TentacleVersion, proxy settings, ...).
+        // The Kubernetes health check reads an agent-metrics configmap with kubectl and logs an error when kubectl is
+        // missing. A sandbox has no cluster: answer that read with nothing and refuse every other command loudly.
+        const string KubectlStub = "#!/bin/sh\n"
+            + "if [ \"$1\" = get ] && [ \"$2\" = cm ]; then exit 0; fi\n"
+            + "echo \"kubectl is not available on sandbox workers\" >&2\n"
+            + "exit 127\n";
+
+        static async Task WriteKubectlStubAsync(TarWriter tar, CancellationToken cancellationToken)
+        {
+            var entry = new PaxTarEntry(TarEntryType.RegularFile, "usr/local/bin/kubectl")
+            {
+                Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute,
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(KubectlStub))
+            };
+            await tar.WriteEntryAsync(entry, cancellationToken);
+        }
+
         // The Kubernetes agent's own tools image stands for "no execution container": use the default disk image.
         static bool IsAgentDefaultImage(string image) => image.Contains("kubernetes-agent-tools-base", StringComparison.OrdinalIgnoreCase);
 
+        // A local script inherits the Tentacle process's own variables (TentacleHome, TentacleVersion, proxy settings, ...).
         Dictionary<string, string> LocalScriptEnvironment(string homeDirectory)
         {
             var environment = new Dictionary<string, string>
