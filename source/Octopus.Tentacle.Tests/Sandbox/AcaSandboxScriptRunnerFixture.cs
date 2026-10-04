@@ -81,6 +81,15 @@ namespace Octopus.Tentacle.Tests.Sandbox
             AcaSandboxToolSnapshots.Key("disk-2", new[] { "/etc/octopus/Tools/A/1", "/etc/octopus/Tools/B/2" }).Should().NotBe(a);
             AcaSandboxToolSnapshots.Key("disk-1", new[] { "/etc/octopus/Tools/A/1", "/etc/octopus/Tools/B/3" }).Should().NotBe(a);
         }
+
+        [TestCase(23, 24, false)]
+        [TestCase(25, 24, true)]
+        [TestCase(1000, 0, false)]
+        public void ToolSnapshotIsStaleOnlyPastAPositiveMaxAge(int ageHours, int maxAgeHours, bool stale)
+        {
+            var now = new DateTimeOffset(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+            AcaSandboxToolSnapshots.IsStale(now.AddHours(-ageHours), now, TimeSpan.FromHours(maxAgeHours)).Should().Be(stale);
+        }
     }
 }
 #endif

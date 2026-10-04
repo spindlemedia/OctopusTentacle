@@ -266,14 +266,14 @@ namespace Octopus.Tentacle.Sandbox
         }
 
         /// <summary>Runs a short command and returns its exit code, stdout and stderr.</summary>
-        public async Task<(int ExitCode, string StdOut, string StdErr)> RunAsync(string id, string bashScript, CancellationToken cancellationToken)
+        public async Task<(int ExitCode, string StdOut, string StdErr)> RunAsync(string id, string bashScript, CancellationToken cancellationToken, IReadOnlyDictionary<string, string>? environment = null)
         {
             var stdout = new MemoryStream();
             var stderr = new MemoryStream();
             var exitCode = await ExecAsync(id,
                 "/bin/bash",
                 new[] { "-c", bashScript },
-                new Dictionary<string, string>(),
+                environment ?? new Dictionary<string, string>(),
                 (isError, bytes) =>
                 {
                     (isError ? stderr : stdout).Write(bytes, 0, bytes.Length);

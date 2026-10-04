@@ -56,6 +56,9 @@ namespace Octopus.Tentacle.Sandbox
 
         /// <summary>Start scripts from a snapshot with their tool folders on local disk (ACA_SANDBOX_TOOL_SNAPSHOTS=false turns it off).</summary>
         public bool ToolSnapshots { get; set; } = true;
+
+        /// <summary>Tool snapshots older than this are rebuilt, renewing whatever the image's prepare hook caches (zero: never).</summary>
+        public TimeSpan ToolSnapshotMaxAge { get; set; } = TimeSpan.FromHours(24);
         public TimeSpan StartTimeout { get; set; } = TimeSpan.FromMinutes(2);
         public TimeSpan CancelGracePeriod { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -88,7 +91,8 @@ namespace Octopus.Tentacle.Sandbox
                 FilesContainer = Optional("ACA_SANDBOX_FILES_CONTAINER") ?? "octopus-files",
                 FilesVolume = Optional("ACA_SANDBOX_FILES_VOLUME") ?? "octopus-files",
                 KeepSandboxes = string.Equals(Optional("ACA_SANDBOX_KEEP"), "true", StringComparison.OrdinalIgnoreCase),
-                ToolSnapshots = !string.Equals(Optional("ACA_SANDBOX_TOOL_SNAPSHOTS"), "false", StringComparison.OrdinalIgnoreCase)
+                ToolSnapshots = !string.Equals(Optional("ACA_SANDBOX_TOOL_SNAPSHOTS"), "false", StringComparison.OrdinalIgnoreCase),
+                ToolSnapshotMaxAge = TimeSpan.FromHours(int.TryParse(Optional("ACA_SANDBOX_TOOL_SNAPSHOT_MAX_AGE_HOURS"), out var maxAgeHours) ? maxAgeHours : 24)
             };
         }
     }
