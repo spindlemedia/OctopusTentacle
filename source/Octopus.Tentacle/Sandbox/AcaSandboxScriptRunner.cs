@@ -41,10 +41,14 @@ namespace Octopus.Tentacle.Sandbox
         readonly IHomeDirectoryProvider home;
         readonly AcaSandboxPodImages podImages;
         readonly AcaSandboxToolSnapshots toolSnapshots;
+        readonly AcaSandboxTokenProvider tokens;
         readonly ISystemLog log;
+        readonly SemaphoreSlim defaultDiskGate = new(1, 1);
+        string? defaultDiskImageId;
 
-        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, AcaSandboxToolSnapshots toolSnapshots, ISystemLog log)
+        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, AcaSandboxToolSnapshots toolSnapshots, AcaSandboxTokenProvider tokens, ISystemLog log)
         {
+            this.tokens = tokens;
             this.toolSnapshots = toolSnapshots;
             this.config = config;
             this.client = client;
@@ -106,6 +110,8 @@ namespace Octopus.Tentacle.Sandbox
                 Verbose($"Pod image {podImage.Image} runs as sandbox disk image {diskImageId}");
             }
 
+            diskImageId ??= await DefaultDiskImageAsync(Verbose, cancellationToken);
+
             var clock = Stopwatch.StartNew();
             var referenced = FindReferencedHomePaths(workspace, homeDirectory)
                 .Concat(RecentlyUploadedPackages(homeDirectory))
@@ -114,7 +120,7 @@ namespace Octopus.Tentacle.Sandbox
             var toolsRoot = Path.Combine(homeDirectory, "Tools");
             var toolPaths = referenced.Where(p => p.StartsWith(toolsRoot + "/", StringComparison.Ordinal)).ToList();
             var snapshotId = toolPaths.Count > 0 && toolPaths.All(IsCompleteToolDirectory)
-                ? toolSnapshots.TryGet(diskImageId ?? config.DiskImageId, toolPaths)
+                ? toolSnapshots.TryGet(diskImageId, toolPaths)
                 : null;
             // A sandbox started from a snapshot cannot mount Blob, so packages are copied in instead.
             var mounts = snapshotId == null
@@ -174,6 +180,34 @@ namespace Octopus.Tentacle.Sandbox
                     Verbose($"Keeping sandbox {sandboxId} (ACA_SANDBOX_KEEP=true)");
                 else
                     _ = DeleteInBackgroundAsync(sandboxId);
+            }
+        }
+
+        /// <summary>
+        /// ACA_SANDBOX_DISK_ID, or the disk image built from ACA_SANDBOX_IMAGE: found by image name, built once when a new
+        /// tag first runs a script (which waits for it), then remembered.
+        /// </summary>
+        async Task<string> DefaultDiskImageAsync(Action<string> progress, CancellationToken cancellationToken)
+        {
+            if (config.Image == null)
+                return config.DiskImageId;
+            if (defaultDiskImageId != null)
+                return defaultDiskImageId;
+
+            await defaultDiskGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (defaultDiskImageId == null)
+                {
+                    var registryToken = await tokens.GetRegistryTokenAsync(config.Image.Split('/')[0], cancellationToken);
+                    defaultDiskImageId = await client.EnsureDiskImageAsync(config.Image, AcaSandboxTokenProvider.RegistryUsername, registryToken, progress, cancellationToken);
+                    log.Info($"Sandboxes start from disk image {defaultDiskImageId}, built from {config.Image}");
+                }
+                return defaultDiskImageId;
+            }
+            finally
+            {
+                defaultDiskGate.Release();
             }
         }
 

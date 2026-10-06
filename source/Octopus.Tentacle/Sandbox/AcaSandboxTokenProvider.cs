@@ -16,6 +16,10 @@ namespace Octopus.Tentacle.Sandbox
     {
         public const string SandboxResource = "https://dynamicsessions.io";
         public const string StorageResource = "https://storage.azure.com";
+        public const string ManagementResource = "https://management.azure.com/";
+
+        /// <summary>The user name Azure Container Registry expects with an exchanged refresh token.</summary>
+        public const string RegistryUsername = "00000000-0000-0000-0000-000000000000";
 
         readonly AcaSandboxConfiguration config;
         readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
@@ -28,6 +32,25 @@ namespace Octopus.Tentacle.Sandbox
         }
 
         public Task<string> GetTokenAsync(CancellationToken cancellationToken) => GetTokenAsync(SandboxResource, cancellationToken);
+
+        /// <summary>
+        /// A short-lived pull credential for an Azure Container Registry, exchanged from this identity's token the way
+        /// <c>az acr login --expose-token</c> does. The identity needs AcrPull on the registry.
+        /// </summary>
+        public async Task<string> GetRegistryTokenAsync(string registry, CancellationToken cancellationToken)
+        {
+            var accessToken = await GetTokenAsync(ManagementResource, cancellationToken);
+            using var response = await http.PostAsync($"https://{registry}/oauth2/exchange", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "access_token",
+                ["service"] = registry,
+                ["access_token"] = accessToken
+            }), cancellationToken);
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException($"Exchanging a token for {registry} failed: {(int)response.StatusCode} {body}");
+            return JObject.Parse(body).Value<string>("refresh_token")!;
+        }
 
         public async Task<string> GetTokenAsync(string resource, CancellationToken cancellationToken)
         {

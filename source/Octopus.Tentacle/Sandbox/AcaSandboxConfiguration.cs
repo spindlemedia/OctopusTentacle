@@ -27,6 +27,9 @@ namespace Octopus.Tentacle.Sandbox
         public string SandboxGroupPath { get; set; } = "";
 
         public string DiskImageId { get; set; } = "";
+
+        /// <summary>Worker image (ACA_SANDBOX_IMAGE) the coordinator builds its default disk image from, instead of a hand-made ACA_SANDBOX_DISK_ID.</summary>
+        public string? Image { get; set; }
         public string Cpu { get; set; } = "2000m";
         public string Memory { get; set; } = "4096Mi";
 
@@ -70,11 +73,13 @@ namespace Octopus.Tentacle.Sandbox
 
             string? Optional(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
 
+            var image = Optional("ACA_SANDBOX_IMAGE");
             return new AcaSandboxConfiguration
             {
                 Endpoint = Required("ACA_SANDBOX_ENDPOINT"),
                 SandboxGroupPath = Required("ACA_SANDBOX_GROUP_PATH"),
-                DiskImageId = Required("ACA_SANDBOX_DISK_ID"),
+                Image = image,
+                DiskImageId = image != null ? "" : Required("ACA_SANDBOX_DISK_ID"),
                 Cpu = Optional("ACA_SANDBOX_CPU") ?? "2000m",
                 Memory = Optional("ACA_SANDBOX_MEMORY") ?? "4096Mi",
                 ManagedIdentityClientId = Optional("ACA_SANDBOX_MI_CLIENT_ID"),
