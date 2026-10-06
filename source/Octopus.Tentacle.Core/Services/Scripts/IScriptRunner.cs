@@ -18,6 +18,11 @@ namespace Octopus.Tentacle.Core.Services.Scripts
         /// </summary>
         bool RunsEachScriptOnItsOwnMachine { get; }
 
+        /// <summary>
+        /// False sends this script to a local process instead, for a command that only touches this machine's own files.
+        /// </summary>
+        bool ShouldRun(IScriptWorkspace workspace);
+
         Task<int> RunAsync(
             IScriptWorkspace workspace,
             string shellPath,

@@ -41,7 +41,7 @@ namespace Octopus.Tentacle.Core.Services.Scripts
             IScriptRunner? scriptRunner = null
             )
         {
-            this.scriptRunner = scriptRunner;
+            this.scriptRunner = scriptRunner != null && scriptRunner.ShouldRun(workspace) ? scriptRunner : null;
             this.shell = shell;
             this.workspace = workspace;
             this.stateStore = stateStore;

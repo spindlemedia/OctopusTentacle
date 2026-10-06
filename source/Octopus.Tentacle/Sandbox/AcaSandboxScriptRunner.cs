@@ -56,6 +56,13 @@ namespace Octopus.Tentacle.Sandbox
 
         public bool RunsEachScriptOnItsOwnMachine => true;
 
+        // Package-cache commands read and write only the coordinator's Files folder and package journal, so a sandbox
+        // would add its start-up and copy cost to a second of Calamari work.
+        public bool ShouldRun(IScriptWorkspace workspace)
+            => !File.Exists(workspace.BootstrapScriptFilePath)
+                || ContainerImagePull.TryParse(workspace.BootstrapScriptFilePath) != null
+                || !IsPackageCacheCommand(File.ReadAllText(workspace.BootstrapScriptFilePath));
+
         public async Task<int> RunAsync(
             IScriptWorkspace workspace,
             string shellPath,
@@ -111,7 +118,7 @@ namespace Octopus.Tentacle.Sandbox
                 : null;
             // A sandbox started from a snapshot cannot mount Blob, so packages are copied in instead.
             var mounts = snapshotId == null
-                ? await PlanMountsAsync(workspace, homeDirectory, referenced, Verbose, cancellationToken)
+                ? await PlanMountsAsync(homeDirectory, referenced, Verbose, cancellationToken)
                 : new Dictionary<string, string>();
             if (snapshotId != null)
                 Verbose($"Starting from snapshot {snapshotId}, which has {string.Join(", ", toolPaths.Select(p => Path.GetRelativePath(toolsRoot, p)))} on local disk");
@@ -130,7 +137,9 @@ namespace Octopus.Tentacle.Sandbox
             try
             {
                 clock.Restart();
-                var staged = await StageInAsync(sandboxId, workspace, referenced, mounts.Values.ToList(), cancellationToken);
+                // Mounted folders, and tool folders already in the snapshot, need no copy and no check.
+                var alreadyThere = mounts.Values.Concat(snapshotId != null ? toolPaths : Enumerable.Empty<string>()).ToList();
+                var staged = await StageInAsync(sandboxId, workspace, referenced, alreadyThere, cancellationToken);
                 Verbose($"Copied {staged.Files} files ({staged.Bytes / 1024.0 / 1024.0:F1} MB) into the sandbox in {clock.Elapsed.TotalSeconds:F1} s");
 
                 int exitCode;
@@ -181,16 +190,23 @@ namespace Octopus.Tentacle.Sandbox
             }
         }
 
-        // Calamari commands that write to the package cache cannot run with Files mounted read-only.
-        static readonly string[] PackageCacheCommands = { " clean-packages", " find-package", " apply-delta", " release-package-lock", " register-package", " download-and-register-package" };
+        static readonly string[] PackageCacheCommands = { "clean-packages", "find-package", "apply-delta", "release-package-lock", "register-package", "download-and-register-package" };
+        static readonly Regex CalamariInvocation = new(@"^\s*(?:setsid\s+)?""\$CalamariExecutablePath""\s+(\S+)", RegexOptions.Multiline);
+
+        /// <summary>True when the bootstrap's only Calamari invocation is a package-cache command.</summary>
+        internal static bool IsPackageCacheCommand(string bootstrap)
+        {
+            var invocations = CalamariInvocation.Matches(bootstrap);
+            return invocations.Count == 1 && PackageCacheCommands.Contains(invocations[0].Groups[1].Value);
+        }
 
         /// <summary>
         /// Decides which home folders the sandbox mounts read-only from Blob instead of receiving a copy: Tools when every
         /// tool folder the script refers to is complete (Success.txt) and in Blob, uploading it once if only the
-        /// coordinator has it; Files when the script uses recently pushed packages and does not manage the package cache.
+        /// coordinator has it; Files when the script uses recently pushed packages (package-cache commands run locally).
         /// Returns volume name to mount path.
         /// </summary>
-        async Task<Dictionary<string, string>> PlanMountsAsync(IScriptWorkspace workspace, string homeDirectory, List<string> referenced, Action<string> verbose, CancellationToken cancellationToken)
+        async Task<Dictionary<string, string>> PlanMountsAsync(string homeDirectory, List<string> referenced, Action<string> verbose, CancellationToken cancellationToken)
         {
             var mounts = new Dictionary<string, string>();
             if (!blobs.Enabled)
@@ -227,8 +243,7 @@ namespace Octopus.Tentacle.Sandbox
 
             var filesRoot = Path.Combine(homeDirectory, "Files");
             var packages = referenced.Where(p => File.Exists(p) && p.StartsWith(filesRoot + "/", StringComparison.Ordinal)).ToList();
-            var bootstrap = File.Exists(workspace.BootstrapScriptFilePath) ? File.ReadAllText(workspace.BootstrapScriptFilePath) : "";
-            if (packages.Count > 0 && !PackageCacheCommands.Any(bootstrap.Contains))
+            if (packages.Count > 0)
             {
                 try
                 {
@@ -249,9 +264,10 @@ namespace Octopus.Tentacle.Sandbox
             return mounts;
         }
 
-        async Task<(int Files, long Bytes)> StageInAsync(string sandboxId, IScriptWorkspace workspace, List<string> referenced, List<string> mountedRoots, CancellationToken cancellationToken)
+        /// <summary>Uploads the files the script needs as one archive; the script's own exec unpacks it, saving a round trip.</summary>
+        async Task<(int Files, long Bytes)> StageInAsync(string sandboxId, IScriptWorkspace workspace, List<string> referenced, List<string> presentRoots, CancellationToken cancellationToken)
         {
-            bool Mounted(string path) => mountedRoots.Any(root => path.StartsWith(root + "/", StringComparison.Ordinal));
+            bool Mounted(string path) => presentRoots.Any(root => path == root || path.StartsWith(root + "/", StringComparison.Ordinal));
 
             var files = Directory.EnumerateFiles(workspace.WorkingDirectory, "*", SearchOption.AllDirectories)
                 .Where(f => !LocalOnlyWorkspaceFiles.Contains(Path.GetFileName(f)))
@@ -297,12 +313,6 @@ namespace Octopus.Tentacle.Sandbox
                 {
                     await client.UploadFileAsync(sandboxId, StageInPath, input, cancellationToken);
                 }
-
-                var extract = await client.RunAsync(sandboxId,
-                    $"tar -xzf {StageInPath} -C / && rm -f {StageInPath} && touch {StartMarkerPath}",
-                    cancellationToken);
-                if (extract.ExitCode != 0)
-                    throw new IOException($"Extracting the staged files in sandbox {sandboxId} failed ({extract.ExitCode}): {extract.StdErr}");
 
                 return (files.Count, bytes);
             }
@@ -379,7 +389,7 @@ namespace Octopus.Tentacle.Sandbox
             CancellationToken cancellationToken)
         {
             var arguments = string.Join(" ", (workspace.ScriptArguments ?? Array.Empty<string>()).Select(Quote));
-            var command = $"cd {Quote(workspace.WorkingDirectory)} && exec {Quote(shellPath)} {Quote(workspace.BootstrapScriptFilePath)} {arguments}";
+            var command = $"tar -xzf {StageInPath} -C / && rm -f {StageInPath} && touch {StartMarkerPath} && cd {Quote(workspace.WorkingDirectory)} && exec {Quote(shellPath)} {Quote(workspace.BootstrapScriptFilePath)} {arguments}";
 
             var localEnvironment = LocalScriptEnvironment(homeDirectory);
             // docker run's --env values are shell expressions such as $TentacleHome; expand them against the local environment.

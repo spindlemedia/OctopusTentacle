@@ -39,6 +39,17 @@ namespace Octopus.Tentacle.Tests.Sandbox
             AcaSandboxScriptRunner.IsCopyBackAllowed(path, Home, Work).Should().Be(allowed);
         }
 
+        [TestCase("setsid  \"$CalamariExecutablePath\" find-package -packageId \"A\" &\nwait $CALAMARI_PID\n", true)]
+        [TestCase("setsid  \"$CalamariExecutablePath\" release-package-lock -taskId \"ServerTasks-1\" &\n", true)]
+        [TestCase("  \"$CalamariExecutablePath\" clean-packages\n", true)]
+        [TestCase("setsid  \"$CalamariExecutablePath\" run-script -script \"Script.sh\" &\n", false)]
+        [TestCase("echo ' find-package '\n", false)]
+        [TestCase("\"$CalamariExecutablePath\" find-package\n\"$CalamariExecutablePath\" run-script\n", false)]
+        public void OnlyABootstrapWhoseOneCalamariCallManagesThePackageCacheRunsLocally(string bootstrap, bool local)
+        {
+            AcaSandboxScriptRunner.IsPackageCacheCommand(bootstrap).Should().Be(local);
+        }
+
         [TestCase("/a/./b/../c", "/a/c")]
         [TestCase("/../../etc", "/etc")]
         [TestCase("//a//b/", "/a/b")]
