@@ -35,7 +35,7 @@ namespace Octopus.Tentacle.Services
                 RegisterHalibutServices<KubernetesServiceAttribute>(builder, allTypes);
             }
 #if !NETFRAMEWORK
-            else if (Sandbox.AcaSandboxConfiguration.UsesKubernetesContract)
+            else if (Sandbox.AcaSandboxConfiguration.IsEnabled)
             {
                 RegisterHalibutServices<Sandbox.AcaSandboxKubernetesServiceAttribute>(builder, allTypes);
             }

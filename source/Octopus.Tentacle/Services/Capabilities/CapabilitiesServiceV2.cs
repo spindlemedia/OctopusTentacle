@@ -20,7 +20,7 @@ namespace Octopus.Tentacle.Services.Capabilities
             //the kubernetes agent only supports the kubernetes script services
             if (KubernetesSupportDetection.IsRunningAsKubernetesAgent
 #if !NETFRAMEWORK
-                || Sandbox.AcaSandboxConfiguration.UsesKubernetesContract
+                || Sandbox.AcaSandboxConfiguration.IsEnabled
 #endif
                )
             {

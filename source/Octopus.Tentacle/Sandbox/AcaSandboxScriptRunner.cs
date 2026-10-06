@@ -64,7 +64,6 @@ namespace Octopus.Tentacle.Sandbox
         // would add its start-up and copy cost to a second of Calamari work.
         public bool ShouldRun(IScriptWorkspace workspace)
             => !File.Exists(workspace.BootstrapScriptFilePath)
-                || ContainerImagePull.TryParse(workspace.BootstrapScriptFilePath) != null
                 || !IsPackageCacheCommand(File.ReadAllText(workspace.BootstrapScriptFilePath));
 
         public async Task<int> RunAsync(
@@ -78,34 +77,10 @@ namespace Octopus.Tentacle.Sandbox
             var homeDirectory = Path.GetFullPath(home.HomeDirectory ?? throw new InvalidOperationException("Tentacle home directory is not set."));
             void Verbose(string message) => writer.WriteOutput(ProcessOutputSource.Debug, message);
 
-            var imagePull = ContainerImagePull.TryParse(workspace.BootstrapScriptFilePath);
-            if (imagePull != null)
-            {
-                // Execution containers: Octopus first asks the worker to `docker pull` the step's image. A sandbox has no
-                // Docker daemon, so the coordinator builds (or reuses) a sandbox disk image from that image instead.
-                var clockPull = Stopwatch.StartNew();
-                var pulledDiskImageId = await client.EnsureDiskImageAsync(imagePull.Image, imagePull.Username, imagePull.Password, m => writer.WriteOutput(ProcessOutputSource.StdOut, m), cancellationToken);
-                writer.WriteOutput(ProcessOutputSource.StdOut, $"Sandbox disk image {pulledDiskImageId} is ready for {imagePull.Image} ({clockPull.Elapsed.TotalSeconds:F1} s)");
-                // The server reads these from Calamari's download-and-register-package (PackageDownloadService.SetOutputVariables).
-                // Same shapes as Calamari's Docker downloader: an image digest and a byte size.
-                var pseudoDigest = "sha256:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(imagePull.Image + "|" + pulledDiskImageId))).ToLowerInvariant();
-                writer.WriteOutput(ProcessOutputSource.StdOut, SetVariableMessage("StagedPackage.Hash", pseudoDigest));
-                writer.WriteOutput(ProcessOutputSource.StdOut, SetVariableMessage("StagedPackage.Size", "1048576"));
-                writer.WriteOutput(ProcessOutputSource.StdOut, SetVariableMessage("StagedPackage.FullPathOnRemoteMachine", ""));
-                return 0;
-            }
-
             string? diskImageId = null;
-            var container = ContainerStep.TryUnwrap(workspace.BootstrapScriptFilePath);
-            if (container != null)
+            if (podImages.Get(workspace.ScriptTicket) is { } podImage && !IsAgentDefaultImage(podImage.Image!))
             {
-                // Execution container step: run Calamari directly in a sandbox built from the step's image.
-                diskImageId = await client.EnsureDiskImageAsync(container.Image, null, null, Verbose, cancellationToken);
-                Verbose($"Execution container {container.Image} runs as sandbox disk image {diskImageId}");
-            }
-            else if (podImages.Get(workspace.ScriptTicket) is { } podImage && !IsAgentDefaultImage(podImage.Image!))
-            {
-                // Kubernetes contract: the pod image arrives as a typed field with its feed credentials.
+                // A step in an execution container: its image arrives as the pod image, with the feed's credentials.
                 diskImageId = await client.EnsureDiskImageAsync(podImage.Image!, podImage.FeedUsername, podImage.FeedPassword, Verbose, cancellationToken);
                 Verbose($"Pod image {podImage.Image} runs as sandbox disk image {diskImageId}");
             }
@@ -152,7 +127,7 @@ namespace Octopus.Tentacle.Sandbox
                 clock.Restart();
                 try
                 {
-                    exitCode = await RunScriptAsync(sandboxId, workspace, shellPath, homeDirectory, container?.Environment, environmentVariables, writer, cancellationToken);
+                    exitCode = await RunScriptAsync(sandboxId, workspace, shellPath, homeDirectory, environmentVariables, writer, cancellationToken);
                     Verbose($"Script exited with code {exitCode} after {clock.Elapsed.TotalSeconds:F1} s");
                 }
                 finally
@@ -337,8 +312,7 @@ namespace Octopus.Tentacle.Sandbox
                     {
                         foreach (var file in files)
                             await tar.WriteEntryAsync(file, file.TrimStart('/'), cancellationToken);
-                        if (AcaSandboxConfiguration.UsesKubernetesContract)
-                            await WriteKubectlStubAsync(tar, cancellationToken);
+                        await WriteKubectlStubAsync(tar, cancellationToken);
                     }
                 }
 
@@ -417,7 +391,6 @@ namespace Octopus.Tentacle.Sandbox
             IScriptWorkspace workspace,
             string shellPath,
             string homeDirectory,
-            IReadOnlyDictionary<string, string>? containerEnvironment,
             IReadOnlyDictionary<string, string> environmentVariables,
             IScriptLogWriter writer,
             CancellationToken cancellationToken)
@@ -425,15 +398,7 @@ namespace Octopus.Tentacle.Sandbox
             var arguments = string.Join(" ", (workspace.ScriptArguments ?? Array.Empty<string>()).Select(Quote));
             var command = $"tar -xzf {StageInPath} -C / && rm -f {StageInPath} && touch {StartMarkerPath} && cd {Quote(workspace.WorkingDirectory)} && exec {Quote(shellPath)} {Quote(workspace.BootstrapScriptFilePath)} {arguments}";
 
-            var localEnvironment = LocalScriptEnvironment(homeDirectory);
-            // docker run's --env values are shell expressions such as $TentacleHome; expand them against the local environment.
-            var environment = containerEnvironment != null
-                ? containerEnvironment.ToDictionary(
-                    pair => pair.Key,
-                    pair => Regex.Replace(pair.Value, @"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", m => localEnvironment.TryGetValue(m.Groups[1].Value, out var value) ? value : ""))
-                : localEnvironment;
-            // The bootstrap itself runs outside the container on a normal worker and always needs the home.
-            environment["TentacleHome"] = homeDirectory;
+            var environment = LocalScriptEnvironment(homeDirectory);
             foreach (var pair in environmentVariables)
                 environment[pair.Key] = pair.Value;
 
@@ -507,8 +472,7 @@ namespace Octopus.Tentacle.Sandbox
             }
             environment["TentacleHome"] = homeDirectory;
             // A Kubernetes agent's script pod gets no deployment journal.
-            if (AcaSandboxConfiguration.UsesKubernetesContract)
-                environment.Remove("TentacleJournal");
+            environment.Remove("TentacleJournal");
             foreach (var name in config.PassThroughVariables)
             {
                 var value = Environment.GetEnvironmentVariable(name);
@@ -656,82 +620,7 @@ namespace Octopus.Tentacle.Sandbox
             }
         }
 
-        static string SetVariableMessage(string name, string value)
-            => $"##octopus[setVariable name='{Convert.ToBase64String(Encoding.UTF8.GetBytes(name))}' value='{Convert.ToBase64String(Encoding.UTF8.GetBytes(value))}']";
-
         static string Quote(string value) => "'" + value.Replace("'", "'\\''") + "'";
-
-        /// <summary>
-        /// The bootstrap of an execution-container step wraps Calamari in a multi-line
-        /// <c>docker run --entrypoint='' --rm \ ... image \</c> (one argument per line) followed by the usual Calamari line.
-        /// </summary>
-        internal static class ContainerStep
-        {
-            static readonly Regex DockerRun = new(@"^docker run [^\n]*\\\n(?:[^\n]*\\\n)*", RegexOptions.Multiline);
-
-            static readonly Regex EnvArgument = new(@"--env\s+(?:""(?<name>[A-Za-z_]\w*)=(?<value>[^""]*)""|'(?<name>[A-Za-z_]\w*)=(?<value>[^']*)'|(?<name>[A-Za-z_]\w*)=(?<value>\S*))");
-
-            internal static Dictionary<string, string> ParseEnvironment(string dockerRun)
-                => EnvArgument.Matches(dockerRun).ToDictionary(m => m.Groups["name"].Value, m => m.Groups["value"].Value);
-
-            /// <summary>
-            /// Removes the docker run wrapper from the bootstrap and returns the image plus only the variables docker run
-            /// would pass (Calamari journals when it sees TentacleJournal, which a container never has), or null.
-            /// </summary>
-            public static ContainerRun? TryUnwrap(string bootstrapPath)
-            {
-                if (!File.Exists(bootstrapPath))
-                    return null;
-                var text = File.ReadAllText(bootstrapPath);
-                var match = DockerRun.Match(text);
-                if (!match.Success)
-                    return null;
-
-                var lines = match.Value.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                var image = lines[^1].TrimEnd('\\').Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
-                var environment = ParseEnvironment(match.Value);
-                File.WriteAllText(bootstrapPath, text.Remove(match.Index, match.Length));
-                return new ContainerRun(image, environment);
-            }
-        }
-
-        internal record ContainerRun(string Image, IReadOnlyDictionary<string, string> Environment);
-
-        /// <summary>A Calamari download-and-register-package call for a Docker feed, read from the bootstrap script.</summary>
-        internal class ContainerImagePull
-        {
-            public string Image { get; private init; } = "";
-            public string? Username { get; private init; }
-            public string? Password { get; private init; }
-
-            public static ContainerImagePull? TryParse(string bootstrapPath)
-            {
-                if (!File.Exists(bootstrapPath))
-                    return null;
-                var line = File.ReadLines(bootstrapPath).FirstOrDefault(l => l.Contains(" download-and-register-package ") && l.Contains("-feedType \"Docker\""));
-                if (line == null)
-                    return null;
-
-                string? Arg(string name)
-                {
-                    var match = Regex.Match(line, "-" + name + @"\s+""([^""]*)""");
-                    return match.Success ? match.Groups[1].Value : null;
-                }
-
-                var packageId = Arg("packageId") ?? throw new InvalidOperationException("download-and-register-package without -packageId");
-                var version = Arg("packageVersion") ?? throw new InvalidOperationException("download-and-register-package without -packageVersion");
-                return new ContainerImagePull { Image = ImageName(Arg("feedUri"), packageId, version), Username = Arg("feedUsername"), Password = Arg("feedPassword") };
-            }
-
-            internal static string ImageName(string? feedUri, string packageId, string version)
-            {
-                // Authority keeps a non-default port (registry.example:5000).
-                var registry = new Uri(feedUri ?? "https://index.docker.io").Authority;
-                return registry is "index.docker.io" or "registry-1.docker.io" or "docker.io"
-                    ? $"docker.io/{(packageId.Contains('/') ? packageId : "library/" + packageId)}:{version}"
-                    : $"{registry}/{packageId}:{version}";
-            }
-        }
 
         /// <summary>Turns streamed byte chunks into whole lines.</summary>
         class LineSplitter

@@ -13,12 +13,8 @@ namespace Octopus.Tentacle.Sandbox
     {
         public const string RunnerVariable = "TENTACLE_SCRIPT_RUNNER";
 
-        public const string ContractVariable = "ACA_SANDBOX_CONTRACT";
-
+        /// <summary>The coordinator offers Octopus only the Kubernetes agent's script contract.</summary>
         public static bool IsEnabled => string.Equals(Environment.GetEnvironmentVariable(RunnerVariable), "AcaSandbox", StringComparison.OrdinalIgnoreCase);
-
-        /// <summary>ACA_SANDBOX_CONTRACT=Kubernetes offers Octopus the Kubernetes agent's script contract instead of ScriptServiceV2.</summary>
-        public static bool UsesKubernetesContract => IsEnabled && string.Equals(Environment.GetEnvironmentVariable(ContractVariable), "Kubernetes", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>Data-plane endpoint, e.g. https://management.southcentralus.azuredevcompute.io</summary>
         public string Endpoint { get; set; } = "";

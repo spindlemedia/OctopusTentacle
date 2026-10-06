@@ -58,32 +58,6 @@ namespace Octopus.Tentacle.Tests.Sandbox
             AcaSandboxScriptRunner.NormalizeUnixPath(path).Should().Be(expected);
         }
 
-        [TestCase("https://registry.example:5000", "team/app", "1.2", "registry.example:5000/team/app:1.2")]
-        [TestCase("https://registry.example.azurecr.io", "team/worker", "16-1", "registry.example.azurecr.io/team/worker:16-1")]
-        [TestCase("https://index.docker.io", "ubuntu", "24.04", "docker.io/library/ubuntu:24.04")]
-        [TestCase(null, "octopusdeploy/worker-tools", "6", "docker.io/octopusdeploy/worker-tools:6")]
-        public void ImageNameKeepsTheRegistryPort(string? feedUri, string packageId, string version, string expected)
-        {
-            AcaSandboxScriptRunner.ContainerImagePull.ImageName(feedUri, packageId, version).Should().Be(expected);
-        }
-
-        [Test]
-        public void QuotedEnvValuesKeepTheirSpaces()
-        {
-            const string dockerRun = "docker run --entrypoint='' --rm \\\n"
-                + "  --env TentacleHome=$TentacleHome \\\n"
-                + "  --env \"GREETING=hello there\" \\\n"
-                + "  --env 'PATH_WITH_SPACE=/opt/my tools' \\\n"
-                + "  image:tag \\\n";
-
-            AcaSandboxScriptRunner.ContainerStep.ParseEnvironment(dockerRun).Should().BeEquivalentTo(new System.Collections.Generic.Dictionary<string, string>
-            {
-                ["TentacleHome"] = "$TentacleHome",
-                ["GREETING"] = "hello there",
-                ["PATH_WITH_SPACE"] = "/opt/my tools"
-            });
-        }
-
         [Test]
         public void ToolSnapshotKeyIgnoresOrderAndTrailingSlashButNotTheDiskImage()
         {
