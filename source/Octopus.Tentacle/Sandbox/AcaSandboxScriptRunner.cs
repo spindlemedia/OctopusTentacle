@@ -234,11 +234,16 @@ namespace Octopus.Tentacle.Sandbox
             var bootstrap = File.ReadAllText(workspace.BootstrapScriptFilePath);
             if (!PackageCacheCommands.Any(bootstrap.Contains))
                 return;
-            verbose($"Package-cache bootstrap sent to a sandbox ({CalamariInvocation.Matches(bootstrap).Count} matched invocations):");
-            foreach (var line in bootstrap.Split('\n').Where(l => l.Contains("Calamari", StringComparison.OrdinalIgnoreCase) || PackageCacheCommands.Any(l.Contains)).Take(10))
+            static string Show(string s) => Regex.Replace(s, @"(?i)(password\S*\s+)\S+", "$1***").Replace("\r", "\\r").Replace("\t", "\\t");
+            var invocations = CalamariInvocation.Matches(bootstrap);
+            verbose($"Package-cache bootstrap sent to a sandbox: {invocations.Count} matched invocations, IsPackageCacheCommand={IsPackageCacheCommand(bootstrap)}, arguments=[{Show(string.Join(" ", workspace.ScriptArguments ?? Array.Empty<string>()))}]");
+            foreach (Match m in invocations)
+                verbose($"  matched command '{Show(m.Groups[1].Value)}' in: {Show(m.Value.Trim())}");
+            var lines = bootstrap.Split('\n');
+            for (var i = 0; i < lines.Length; i++)
             {
-                var redacted = Regex.Replace(line, @"(?i)(password\S*\s+)\S+", "$1***");
-                verbose("  " + redacted.Replace("\r", "\\r").Replace("\t", "\\t"));
+                if (lines[i].Contains("$CalamariExecutablePath\"") || PackageCacheCommands.Any(lines[i].Contains))
+                    verbose($"  line {i + 1}: {Show(lines[i])}");
             }
         }
 
