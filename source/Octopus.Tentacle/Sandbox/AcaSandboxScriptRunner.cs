@@ -80,6 +80,7 @@ namespace Octopus.Tentacle.Sandbox
         {
             var homeDirectory = Path.GetFullPath(home.HomeDirectory ?? throw new InvalidOperationException("Tentacle home directory is not set."));
             void Verbose(string message) => writer.WriteOutput(ProcessOutputSource.Debug, message);
+            LogUnmatchedPackageCacheBootstrap(workspace, Verbose);
 
             string? diskImageId = null;
             if (podImages.Get(workspace.ScriptTicket) is { } podImage && !IsAgentDefaultImage(podImage.Image!))
@@ -224,6 +225,22 @@ namespace Octopus.Tentacle.Sandbox
 
         static readonly string[] PackageCacheCommands = { "clean-packages", "find-package", "apply-delta", "release-package-lock", "register-package", "download-and-register-package" };
         static readonly Regex CalamariInvocation = new(@"^\s*(?:setsid\s+)?""\$CalamariExecutablePath""\s+(\S+)", RegexOptions.Multiline);
+
+        // TEMPORARY: shows why a package-cache script reached a sandbox, so the matcher can be fixed from a real bootstrap.
+        static void LogUnmatchedPackageCacheBootstrap(IScriptWorkspace workspace, Action<string> verbose)
+        {
+            if (!File.Exists(workspace.BootstrapScriptFilePath))
+                return;
+            var bootstrap = File.ReadAllText(workspace.BootstrapScriptFilePath);
+            if (!PackageCacheCommands.Any(bootstrap.Contains))
+                return;
+            verbose($"Package-cache bootstrap sent to a sandbox ({CalamariInvocation.Matches(bootstrap).Count} matched invocations):");
+            foreach (var line in bootstrap.Split('\n').Where(l => l.Contains("Calamari", StringComparison.OrdinalIgnoreCase) || PackageCacheCommands.Any(l.Contains)).Take(10))
+            {
+                var redacted = Regex.Replace(line, @"(?i)(password\S*\s+)\S+", "$1***");
+                verbose("  " + redacted.Replace("\r", "\\r").Replace("\t", "\\t"));
+            }
+        }
 
         /// <summary>True when the bootstrap's only Calamari invocation is a package-cache command.</summary>
         internal static bool IsPackageCacheCommand(string bootstrap)
