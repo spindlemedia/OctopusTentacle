@@ -222,6 +222,13 @@ namespace Octopus.Tentacle.Startup
 #endif
         }
 
+#if !FULL_FRAMEWORK
+        // Container Apps sends SIGTERM to every process in the container; the sandbox coordinator's entrypoint drains
+        // running scripts first and then stops Tentacle with SIGKILL.
+        internal static IDisposable? IgnoreSigtermWhileTheEntrypointDrains()
+            => Sandbox.AcaSandboxConfiguration.IsEnabled ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context => context.Cancel = true) : null;
+#endif
+
         int HandleException(Exception ex)
         {
             var unpacked = ex.UnpackFromContainers();

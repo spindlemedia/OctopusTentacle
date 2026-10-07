@@ -36,6 +36,9 @@ namespace Octopus.Tentacle.Commands
         readonly IEnumerable<Lazy<IBackgroundTask>> backgroundTasks;
         int wait;
         bool halibutHasStarted;
+#if !FULL_FRAMEWORK
+        IDisposable? ignoredSigterm;
+#endif
 
         public override bool CanRunAsService => true;
 
@@ -136,6 +139,9 @@ namespace Octopus.Tentacle.Commands
                 backgroundTaskLazy.Value.Start();
             }
 
+#if !FULL_FRAMEWORK
+            ignoredSigterm = OctopusProgram.IgnoreSigtermWhileTheEntrypointDrains();
+#endif
             Runtime.WaitForUserToExit();
         }
 
@@ -153,6 +159,9 @@ namespace Octopus.Tentacle.Commands
 
         protected override void Stop()
         {
+#if !FULL_FRAMEWORK
+            ignoredSigterm?.Dispose();
+#endif
             if (halibutHasStarted)
             {
                 halibut.Value.Stop();
