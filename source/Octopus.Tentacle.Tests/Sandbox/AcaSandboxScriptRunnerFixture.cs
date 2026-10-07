@@ -51,6 +51,17 @@ namespace Octopus.Tentacle.Tests.Sandbox
             AcaSandboxScriptRunner.IsPackageCacheCommand(bootstrap).Should().Be(local);
         }
 
+        // Octopus sends this before every Calamari call (ServerTasks-826586).
+        const string CapabilityProbe = "#!/bin/bash\nencode_servicemessagevalue ()\n{\n    echo -n \"$1\" | openssl enc -base64 -A\n}\nos=$( encode_servicemessagevalue $(uname -s) )\narch=$( encode_servicemessagevalue $(uname -m) )\nif [ -x \"$(command -v setsid)\" ]; then\n    setsid_available=$( encode_servicemessagevalue \"true\" )\nelse\n    setsid_available=$( encode_servicemessagevalue \"false\" )\nfi\necho \"##octopus[os Arch='$arch' Name='$os' capability_setsid='$setsid_available']\"\necho \"##octopus[bootstrapper Name=\\\"QmFzaA==\\\"]\"\n";
+
+        [TestCase(CapabilityProbe, true)]
+        [TestCase(CapabilityProbe + "setsid  \"$CalamariExecutablePath\" run-script -script \"Script.sh\" &\n", false)]
+        [TestCase("#!/bin/bash\nsqlcmd -i Update.sql\n", false)]
+        public void OctopusCapabilityProbeRunsLocally(string bootstrap, bool local)
+        {
+            AcaSandboxScriptRunner.IsCapabilityProbe(bootstrap).Should().Be(local);
+        }
+
         [TestCase("smiregistry.azurecr.io/smi.octo.dbworker:latest", "smiregistry.azurecr.io", "smi.octo.dbworker", "latest", null)]
         [TestCase("smiregistry.azurecr.io/smi.octo.dbworker", "smiregistry.azurecr.io", "smi.octo.dbworker", "latest", null)]
         [TestCase("localhost:5000/team/tool:1.2", "localhost:5000", "team/tool", "1.2", null)]

@@ -64,11 +64,15 @@ namespace Octopus.Tentacle.Sandbox
 
         public bool RunsEachScriptOnItsOwnMachine => true;
 
-        // Package-cache commands read and write only the coordinator's Files folder and package journal, so a sandbox
-        // would add its start-up and copy cost to a second of Calamari work.
+        // Package-cache commands read and write only the coordinator's Files folder and package journal, and the capability
+        // probe gets the same answers here as in a sandbox, so a sandbox would only add its start-up and copy cost.
         public bool ShouldRun(IScriptWorkspace workspace)
-            => !File.Exists(workspace.BootstrapScriptFilePath)
-                || !IsPackageCacheCommand(File.ReadAllText(workspace.BootstrapScriptFilePath));
+        {
+            if (!File.Exists(workspace.BootstrapScriptFilePath))
+                return true;
+            var bootstrap = File.ReadAllText(workspace.BootstrapScriptFilePath);
+            return !IsPackageCacheCommand(bootstrap) && !IsCapabilityProbe(bootstrap);
+        }
 
         public async Task<int> RunAsync(
             IScriptWorkspace workspace,
@@ -80,7 +84,6 @@ namespace Octopus.Tentacle.Sandbox
         {
             var homeDirectory = Path.GetFullPath(home.HomeDirectory ?? throw new InvalidOperationException("Tentacle home directory is not set."));
             void Verbose(string message) => writer.WriteOutput(ProcessOutputSource.Debug, message);
-            LogUnmatchedPackageCacheBootstrap(workspace, Verbose);
 
             string? diskImageId = null;
             if (podImages.Get(workspace.ScriptTicket) is { } podImage && !IsAgentDefaultImage(podImage.Image!))
@@ -226,21 +229,12 @@ namespace Octopus.Tentacle.Sandbox
         static readonly string[] PackageCacheCommands = { "clean-packages", "find-package", "find-and-register-package", "apply-delta", "release-package-lock", "register-package", "download-and-register-package" };
         static readonly Regex CalamariInvocation = new(@"^\s*(?:setsid\s+)?""\$CalamariExecutablePath""\s+(\S+)", RegexOptions.Multiline);
 
-        // TEMPORARY: shows the scripts Octopus sends that do not call Calamari (one runs before every Calamari call), so they can be matched from real text.
-        static void LogUnmatchedPackageCacheBootstrap(IScriptWorkspace workspace, Action<string> verbose)
-        {
-            if (!File.Exists(workspace.BootstrapScriptFilePath))
-                return;
-            var bootstrap = File.ReadAllText(workspace.BootstrapScriptFilePath);
-            if (CalamariInvocation.IsMatch(bootstrap))
-                return;
-            static string Show(string s) => Regex.Replace(s, @"(?i)(password\S*\s+)\S+", "$1***").Replace("\r", "\\r").Replace("\t", "\\t");
-            var files = Directory.GetFiles(workspace.WorkingDirectory).Select(Path.GetFileName);
-            verbose($"Bootstrap without a Calamari call sent to a sandbox: files=[{string.Join(", ", files)}], arguments=[{Show(string.Join(" ", workspace.ScriptArguments ?? Array.Empty<string>()))}]");
-            var lines = bootstrap.Split('\n');
-            for (var i = 0; i < Math.Min(lines.Length, 60); i++)
-                verbose($"  line {i + 1}: {Show(lines[i])}");
-        }
+        /// <summary>True for the short script Octopus sends before each Calamari call to learn the OS, architecture and setsid support.</summary>
+        internal static bool IsCapabilityProbe(string bootstrap)
+            => !CalamariInvocation.IsMatch(bootstrap)
+                && bootstrap.Split('\n').Length <= 20
+                && bootstrap.Contains("capability_setsid=")
+                && bootstrap.Contains("##octopus[bootstrapper ");
 
         /// <summary>True when the bootstrap's only Calamari invocation is a package-cache command.</summary>
         internal static bool IsPackageCacheCommand(string bootstrap)
