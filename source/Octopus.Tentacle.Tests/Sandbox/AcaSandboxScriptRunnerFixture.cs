@@ -50,6 +50,17 @@ namespace Octopus.Tentacle.Tests.Sandbox
             AcaSandboxScriptRunner.IsPackageCacheCommand(bootstrap).Should().Be(local);
         }
 
+        [TestCase("smiregistry.azurecr.io/smi.octo.dbworker:latest", "smiregistry.azurecr.io", "smi.octo.dbworker", "latest", null)]
+        [TestCase("smiregistry.azurecr.io/smi.octo.dbworker", "smiregistry.azurecr.io", "smi.octo.dbworker", "latest", null)]
+        [TestCase("localhost:5000/team/tool:1.2", "localhost:5000", "team/tool", "1.2", null)]
+        [TestCase("ubuntu:24.04", "docker.io", "library/ubuntu", "24.04", null)]
+        [TestCase("octopusdeploy/worker-tools", "docker.io", "octopusdeploy/worker-tools", "latest", null)]
+        [TestCase("ghcr.io/a/b@sha256:abc", "ghcr.io", "a/b", "latest", "sha256:abc")]
+        public void ParsesImageReferences(string image, string host, string repository, string tag, string? digest)
+        {
+            AcaSandboxRegistry.ImageReference.Parse(image).Should().Be(new AcaSandboxRegistry.ImageReference(host, repository, tag, digest));
+        }
+
         [TestCase("/a/./b/../c", "/a/c")]
         [TestCase("/../../etc", "/etc")]
         [TestCase("//a//b/", "/a/b")]

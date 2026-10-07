@@ -176,6 +176,18 @@ namespace Octopus.Tentacle.Sandbox
             }
         }
 
+        /// <summary>The newest Ready disk image built from any tag or digest of <paramref name="repository"/>.</summary>
+        public async Task<string?> FindNewestDiskImageAsync(string repository, CancellationToken cancellationToken)
+        {
+            var diskImagesUrl = $"{config.Endpoint.TrimEnd('/')}{config.SandboxGroupPath}/diskimages?api-version={ApiVersion}";
+            return (await GetListAsync(diskImagesUrl, cancellationToken))
+                .Where(d => d["status"]?.Value<string>("state") == "Ready")
+                .Where(d => d["image"]?.Value<string>("base") is { } image && (image.StartsWith(repository + ":") || image.StartsWith(repository + "@")))
+                .OrderByDescending(d => d["status"]?["createdAt"]?.ToObject<DateTimeOffset?>())
+                .Select(d => d.Value<string>("id"))
+                .FirstOrDefault();
+        }
+
         public async Task UploadFileAsync(string id, string remotePath, Stream content, CancellationToken cancellationToken)
         {
             using var request = await NewRequestAsync(HttpMethod.Put, $"{SandboxUrl(id)}/files?api-version={ApiVersion}&path={Uri.EscapeDataString(remotePath)}&createDirs=true", cancellationToken);

@@ -1,5 +1,6 @@
 #if !NETFRAMEWORK
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Formats.Tar;
@@ -42,13 +43,16 @@ namespace Octopus.Tentacle.Sandbox
         readonly AcaSandboxPodImages podImages;
         readonly AcaSandboxToolSnapshots toolSnapshots;
         readonly AcaSandboxTokenProvider tokens;
+        readonly AcaSandboxRegistry registry;
         readonly ISystemLog log;
-        readonly SemaphoreSlim defaultDiskGate = new(1, 1);
-        string? defaultDiskImageId;
+        static readonly TimeSpan RecheckImageAfter = TimeSpan.FromMinutes(5);
+        readonly ConcurrentDictionary<string, (string DiskImageId, DateTimeOffset CheckedAt)> diskImages = new();
+        readonly ConcurrentDictionary<string, SemaphoreSlim> diskImageGates = new();
 
-        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, AcaSandboxToolSnapshots toolSnapshots, AcaSandboxTokenProvider tokens, ISystemLog log)
+        public AcaSandboxScriptRunner(AcaSandboxConfiguration config, AcaSandboxClient client, AcaSandboxBlobStore blobs, IHomeDirectoryProvider home, AcaSandboxPodImages podImages, AcaSandboxToolSnapshots toolSnapshots, AcaSandboxTokenProvider tokens, AcaSandboxRegistry registry, ISystemLog log)
         {
             this.tokens = tokens;
+            this.registry = registry;
             this.toolSnapshots = toolSnapshots;
             this.config = config;
             this.client = client;
@@ -81,11 +85,13 @@ namespace Octopus.Tentacle.Sandbox
             if (podImages.Get(workspace.ScriptTicket) is { } podImage && !IsAgentDefaultImage(podImage.Image!))
             {
                 // A step in an execution container: its image arrives as the pod image, with the feed's credentials.
-                diskImageId = await client.EnsureDiskImageAsync(podImage.Image!, podImage.FeedUsername, podImage.FeedPassword, Verbose, cancellationToken);
+                diskImageId = await DiskImageForAsync(podImage.Image!, _ => Task.FromResult((podImage.FeedUsername, podImage.FeedPassword)), Verbose, cancellationToken);
                 Verbose($"Pod image {podImage.Image} runs as sandbox disk image {diskImageId}");
             }
 
-            diskImageId ??= await DefaultDiskImageAsync(Verbose, cancellationToken);
+            diskImageId ??= config.Image == null
+                ? config.DiskImageId
+                : await DiskImageForAsync(config.Image, async ct => ((string?)AcaSandboxTokenProvider.RegistryUsername, (string?)await tokens.GetRegistryTokenAsync(config.Image.Split('/')[0], ct)), Verbose, cancellationToken);
 
             var clock = Stopwatch.StartNew();
             var referenced = FindReferencedHomePaths(workspace, homeDirectory)
@@ -159,30 +165,47 @@ namespace Octopus.Tentacle.Sandbox
         }
 
         /// <summary>
-        /// ACA_SANDBOX_DISK_ID, or the disk image built from ACA_SANDBOX_IMAGE: found by image name, built once when a new
-        /// tag first runs a script (which waits for it), then remembered.
+        /// The disk image built from what the image's tag points to now, so a moving tag such as latest follows each
+        /// rebuild. The tag is looked up at most every five minutes; a new digest waits for its disk image to build. If
+        /// the lookup or build fails, the disk image last used for the image stands, or after a restart the newest one
+        /// built from the same repository.
         /// </summary>
-        async Task<string> DefaultDiskImageAsync(Action<string> progress, CancellationToken cancellationToken)
+        async Task<string> DiskImageForAsync(string image, Func<CancellationToken, Task<(string? Username, string? Password)>> credentials, Action<string> progress, CancellationToken cancellationToken)
         {
-            if (config.Image == null)
-                return config.DiskImageId;
-            if (defaultDiskImageId != null)
-                return defaultDiskImageId;
+            if (diskImages.TryGetValue(image, out var known) && DateTimeOffset.UtcNow - known.CheckedAt < RecheckImageAfter)
+                return known.DiskImageId;
 
-            await defaultDiskGate.WaitAsync(cancellationToken);
+            var gate = diskImageGates.GetOrAdd(image, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
             try
             {
-                if (defaultDiskImageId == null)
+                if (diskImages.TryGetValue(image, out known) && DateTimeOffset.UtcNow - known.CheckedAt < RecheckImageAfter)
+                    return known.DiskImageId;
+
+                string? id;
+                try
                 {
-                    var registryToken = await tokens.GetRegistryTokenAsync(config.Image.Split('/')[0], cancellationToken);
-                    defaultDiskImageId = await client.EnsureDiskImageAsync(config.Image, AcaSandboxTokenProvider.RegistryUsername, registryToken, progress, cancellationToken);
-                    log.Info($"Sandboxes start from disk image {defaultDiskImageId}, built from {config.Image}");
+                    var (username, password) = await credentials(cancellationToken);
+                    var pinned = await registry.PinAsync(image, username, password, cancellationToken);
+                    id = await client.EnsureDiskImageAsync(pinned, username, password, progress, cancellationToken);
                 }
-                return defaultDiskImageId;
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    id = known.DiskImageId ?? await client.FindNewestDiskImageAsync(AcaSandboxRegistry.RepositoryOf(image), cancellationToken);
+                    if (id == null)
+                        throw;
+                    progress($"Could not check {image} for a newer version ({ex.Message}); keeping disk image {id}");
+                    log.Warn(ex, $"Could not check {image} for a newer version; keeping disk image {id}");
+                }
+
+                if (id != known.DiskImageId)
+                    log.Info($"Sandboxes for {image} start from disk image {id}");
+                diskImages[image] = (id, DateTimeOffset.UtcNow);
+                return id;
             }
             finally
             {
-                defaultDiskGate.Release();
+                gate.Release();
             }
         }
 
