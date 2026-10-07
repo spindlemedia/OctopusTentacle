@@ -42,6 +42,7 @@ namespace Octopus.Tentacle.Tests.Sandbox
         [TestCase("setsid  \"$CalamariExecutablePath\" find-package -packageId \"A\" &\nwait $CALAMARI_PID\n", true)]
         [TestCase("setsid  \"$CalamariExecutablePath\" release-package-lock -taskId \"ServerTasks-1\" &\n", true)]
         [TestCase("  \"$CalamariExecutablePath\" clean-packages\n", true)]
+        [TestCase("if [[ ! -x \"$CalamariExecutablePath\" ]]; then\n    chmod +x \"$CalamariExecutablePath\"\nfi\nsetsid  \"$CalamariExecutablePath\" find-and-register-package -packageId \"TaxOffice.DB\" -packageVersion \"2026.16.0-ci.7\" -packageVersionFormat \"Semver\" -packageHash \"0e8f12401806ed218d38df34238ed6729575cdca\" -exactMatch \"True\" -taskId \"ServerTasks-826567\" -variables \"Variables.secret\" -variables \"Variables.Bash.secret\" -variablesPassword=$variablePassword &\n", true)]
         [TestCase("setsid  \"$CalamariExecutablePath\" run-script -script \"Script.sh\" &\n", false)]
         [TestCase("echo ' find-package '\n", false)]
         [TestCase("\"$CalamariExecutablePath\" find-package\n\"$CalamariExecutablePath\" run-script\n", false)]

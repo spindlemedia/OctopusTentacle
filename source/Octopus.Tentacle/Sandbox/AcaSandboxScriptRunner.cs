@@ -223,28 +223,23 @@ namespace Octopus.Tentacle.Sandbox
             }
         }
 
-        static readonly string[] PackageCacheCommands = { "clean-packages", "find-package", "apply-delta", "release-package-lock", "register-package", "download-and-register-package" };
+        static readonly string[] PackageCacheCommands = { "clean-packages", "find-package", "find-and-register-package", "apply-delta", "release-package-lock", "register-package", "download-and-register-package" };
         static readonly Regex CalamariInvocation = new(@"^\s*(?:setsid\s+)?""\$CalamariExecutablePath""\s+(\S+)", RegexOptions.Multiline);
 
-        // TEMPORARY: shows why a package-cache script reached a sandbox, so the matcher can be fixed from a real bootstrap.
+        // TEMPORARY: shows the scripts Octopus sends that do not call Calamari (one runs before every Calamari call), so they can be matched from real text.
         static void LogUnmatchedPackageCacheBootstrap(IScriptWorkspace workspace, Action<string> verbose)
         {
             if (!File.Exists(workspace.BootstrapScriptFilePath))
                 return;
             var bootstrap = File.ReadAllText(workspace.BootstrapScriptFilePath);
-            if (!PackageCacheCommands.Any(bootstrap.Contains))
+            if (CalamariInvocation.IsMatch(bootstrap))
                 return;
             static string Show(string s) => Regex.Replace(s, @"(?i)(password\S*\s+)\S+", "$1***").Replace("\r", "\\r").Replace("\t", "\\t");
-            var invocations = CalamariInvocation.Matches(bootstrap);
-            verbose($"Package-cache bootstrap sent to a sandbox: {invocations.Count} matched invocations, IsPackageCacheCommand={IsPackageCacheCommand(bootstrap)}, arguments=[{Show(string.Join(" ", workspace.ScriptArguments ?? Array.Empty<string>()))}]");
-            foreach (Match m in invocations)
-                verbose($"  matched command '{Show(m.Groups[1].Value)}' in: {Show(m.Value.Trim())}");
+            var files = Directory.GetFiles(workspace.WorkingDirectory).Select(Path.GetFileName);
+            verbose($"Bootstrap without a Calamari call sent to a sandbox: files=[{string.Join(", ", files)}], arguments=[{Show(string.Join(" ", workspace.ScriptArguments ?? Array.Empty<string>()))}]");
             var lines = bootstrap.Split('\n');
-            for (var i = 0; i < lines.Length; i++)
-            {
-                if (lines[i].Contains("$CalamariExecutablePath\"") || PackageCacheCommands.Any(lines[i].Contains))
-                    verbose($"  line {i + 1}: {Show(lines[i])}");
-            }
+            for (var i = 0; i < Math.Min(lines.Length, 60); i++)
+                verbose($"  line {i + 1}: {Show(lines[i])}");
         }
 
         /// <summary>True when the bootstrap's only Calamari invocation is a package-cache command.</summary>
