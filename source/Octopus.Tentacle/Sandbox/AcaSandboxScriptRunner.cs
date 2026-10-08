@@ -11,6 +11,8 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Octopus.Tentacle.Core.Configuration;
 using Octopus.Tentacle.Contracts;
 using Octopus.Tentacle.Core.Diagnostics;
@@ -399,25 +401,67 @@ namespace Octopus.Tentacle.Sandbox
             if (!Directory.Exists(files))
                 return Array.Empty<string>();
 
-            var recent = new List<string>();
-            foreach (var file in Directory.EnumerateFiles(files, "*", SearchOption.AllDirectories))
+            var journalPath = Path.Combine(homeDirectory, "PackageRetentionJournal.json");
+            var journal = File.Exists(journalPath) ? File.ReadAllText(journalPath) : null;
+            var (recent, prune) = PlanPackageCache(
+                Directory.EnumerateFiles(files, "*", SearchOption.AllDirectories).Select(f => (f, File.GetLastWriteTimeUtc(f))),
+                journal,
+                DateTime.UtcNow,
+                config.PackageWindow);
+            foreach (var file in prune)
             {
-                var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(file);
-                if (age <= config.PackageWindow)
-                    recent.Add(file);
-                else if (age > TimeSpan.FromDays(1))
+                try
                 {
-                    try
-                    {
-                        File.Delete(file);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        log.Verbose($"Could not prune old package {file}: {ex.Message}");
-                    }
+                    File.Delete(file);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    log.Verbose($"Could not prune old package {file}: {ex.Message}");
                 }
             }
             return recent;
+        }
+
+        /// <summary>
+        /// Packages to give the sandbox (pushed or used within the window) and packages to delete (neither for a day).
+        /// Use comes from the package journal: a package already on the coordinator is not pushed again, so its file
+        /// time alone misses redeployments.
+        /// </summary>
+        internal static (List<string> Recent, List<string> Prune) PlanPackageCache(IEnumerable<(string Path, DateTime WriteTimeUtc)> files, string? journal, DateTime nowUtc, TimeSpan window)
+        {
+            var lastUsed = LastUsedPackages(journal);
+            var recent = new List<string>();
+            var prune = new List<string>();
+            foreach (var (file, written) in files)
+            {
+                var touched = lastUsed.TryGetValue(file, out var used) && used > written ? used : written;
+                var age = nowUtc - touched;
+                if (age <= window)
+                    recent.Add(file);
+                else if (age > TimeSpan.FromDays(1))
+                    prune.Add(file);
+            }
+            return (recent, prune);
+        }
+
+        /// <summary>Package path to its latest use (UTC) in Calamari's PackageRetentionJournal.json.</summary>
+        static Dictionary<string, DateTime> LastUsedPackages(string? journal)
+        {
+            var lastUsed = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            if (string.IsNullOrWhiteSpace(journal))
+                return lastUsed;
+
+            using var reader = new JsonTextReader(new StringReader(journal.TrimStart('﻿'))) { DateParseHandling = DateParseHandling.None };
+            foreach (var entry in JObject.Load(reader)["JournalEntries"] ?? new JArray())
+            {
+                var path = (string?)entry["Package"]?["Path"]?["Value"];
+                var uses = (entry["usages"] ?? new JArray())
+                    .Select(u => DateTimeOffset.TryParse((string?)u["DateTime"], out var at) ? at.UtcDateTime : DateTime.MinValue)
+                    .ToList();
+                if (path != null && uses.Count > 0)
+                    lastUsed[path] = uses.Max();
+            }
+            return lastUsed;
         }
 
         async Task<int> RunScriptAsync(

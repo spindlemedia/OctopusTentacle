@@ -54,6 +54,37 @@ namespace Octopus.Tentacle.Tests.Sandbox
         // Octopus sends this before every Calamari call (ServerTasks-826586).
         const string CapabilityProbe = "#!/bin/bash\nencode_servicemessagevalue ()\n{\n    echo -n \"$1\" | openssl enc -base64 -A\n}\nos=$( encode_servicemessagevalue $(uname -s) )\narch=$( encode_servicemessagevalue $(uname -m) )\nif [ -x \"$(command -v setsid)\" ]; then\n    setsid_available=$( encode_servicemessagevalue \"true\" )\nelse\n    setsid_available=$( encode_servicemessagevalue \"false\" )\nfi\necho \"##octopus[os Arch='$arch' Name='$os' capability_setsid='$setsid_available']\"\necho \"##octopus[bootstrapper Name=\\\"QmFzaA==\\\"]\"\n";
 
+        // Shape of the coordinator's PackageRetentionJournal.json (BOM included); the package was pushed hours before this use.
+        const string Package = "/etc/octopus/Files/TaxOffice.DB@S2026.16.0-ci.7@8BED873DD2BA2A4D84FAC88CA565742B.nupkg";
+        const string Journal = "﻿{\"JournalEntries\":[{\"usages\":[{\"CacheAgeAtUsage\":{\"Value\":5},\"DateTime\":\"2026-10-08T01:55:04.1764234+00:00\",\"DeploymentTaskId\":\"ServerTasks-826842\"},{\"CacheAgeAtUsage\":{\"Value\":66},\"DateTime\":\"2026-10-08T10:26:00.1+00:00\",\"DeploymentTaskId\":\"ServerTasks-827366\"}],\"locks\":[],\"Package\":{\"PackageId\":{\"Value\":\"TaxOffice.DB\"},\"Version\":{\"Version\":\"2026.16.0-ci.7\",\"Format\":\"Semver\"},\"Path\":{\"Value\":\"" + Package + "\"}},\"FileSizeBytes\":4594957}],\"Cache\":{\"CacheAge\":{\"Value\":66}}}";
+        static readonly DateTime Pushed = new(2026, 10, 8, 1, 55, 3, DateTimeKind.Utc);
+
+        // ServerTasks-827366: the package-cache check runs on the coordinator, so a package Octopus pushed earlier is not
+        // pushed again, and its file time stops meaning "this task uses it".
+        [Test]
+        public void APackagePushedEarlierButJustUsedGoesToTheSandbox()
+        {
+            var (recent, prune) = AcaSandboxScriptRunner.PlanPackageCache(new[] { (Package, Pushed) }, Journal, new DateTime(2026, 10, 8, 10, 26, 6, DateTimeKind.Utc), TimeSpan.FromHours(2));
+            recent.Should().Equal(Package);
+            prune.Should().BeEmpty();
+        }
+
+        [Test]
+        public void APackageUsedInTheLastDayIsNotPruned()
+        {
+            var (recent, prune) = AcaSandboxScriptRunner.PlanPackageCache(new[] { (Package, Pushed.AddDays(-3)) }, Journal, new DateTime(2026, 10, 8, 20, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(2));
+            recent.Should().BeEmpty();
+            prune.Should().BeEmpty();
+        }
+
+        [Test]
+        public void APackageUnusedForADayIsPruned()
+        {
+            var (recent, prune) = AcaSandboxScriptRunner.PlanPackageCache(new[] { (Package, Pushed) }, Journal, new DateTime(2026, 10, 10, 0, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(2));
+            recent.Should().BeEmpty();
+            prune.Should().Equal(Package);
+        }
+
         [TestCase(CapabilityProbe, true)]
         [TestCase(CapabilityProbe + "setsid  \"$CalamariExecutablePath\" run-script -script \"Script.sh\" &\n", false)]
         [TestCase("#!/bin/bash\nsqlcmd -i Update.sql\n", false)]
