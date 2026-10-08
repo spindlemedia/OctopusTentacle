@@ -26,6 +26,7 @@ namespace Octopus.Tentacle.Core.Services.Scripts
         readonly ILog log;
         readonly ScriptIsolationMutex scriptIsolationMutex;
         readonly TimeSpan powerShellStartupTimeout;
+        readonly IScriptRunner? scriptRunner;
 
         public RunningScript(IShell shell,
             IScriptWorkspace workspace,
@@ -36,9 +37,11 @@ namespace Octopus.Tentacle.Core.Services.Scripts
             CancellationToken runningScriptToken,
             IReadOnlyDictionary<string, string> environmentVariables,
             TimeSpan powerShellStartupTimeout,
-            ILog log
+            ILog log,
+            IScriptRunner? scriptRunner = null
             )
         {
+            this.scriptRunner = scriptRunner != null && scriptRunner.ShouldRun(workspace) ? scriptRunner : null;
             this.shell = shell;
             this.workspace = workspace;
             this.stateStore = stateStore;
@@ -82,13 +85,7 @@ namespace Octopus.Tentacle.Core.Services.Scripts
                 {
                     try
                     {
-                        using (scriptIsolationMutex.Acquire(workspace.IsolationLevel,
-                                   workspace.ScriptMutexAcquireTimeout,
-                                   workspace.ScriptMutexName ?? nameof(RunningScript),
-                                   message => writer.WriteOutput(ProcessOutputSource.StdOut, message),
-                                   taskId,
-                                   runningScriptToken,
-                                   log))
+                        using (AcquireIsolationMutex(writer))
                         {
                             State = ProcessState.Running;
 
@@ -127,6 +124,27 @@ namespace Octopus.Tentacle.Core.Services.Scripts
                     ExitCode = exitCode;
                     State = ProcessState.Complete;
                 }
+            }
+        }
+
+        IDisposable AcquireIsolationMutex(IScriptLogWriter writer)
+        {
+            if (scriptRunner?.RunsEachScriptOnItsOwnMachine == true)
+                return new NoopDisposable();
+
+            return scriptIsolationMutex.Acquire(workspace.IsolationLevel,
+                workspace.ScriptMutexAcquireTimeout,
+                workspace.ScriptMutexName ?? nameof(RunningScript),
+                message => writer.WriteOutput(ProcessOutputSource.StdOut, message),
+                taskId,
+                runningScriptToken,
+                log);
+        }
+
+        class NoopDisposable : IDisposable
+        {
+            public void Dispose()
+            {
             }
         }
 
@@ -224,6 +242,9 @@ namespace Octopus.Tentacle.Core.Services.Scripts
 
         async Task<int> RunScriptAsync(string shellPath, IScriptLogWriter writer, CancellationToken cancellationToken)
         {
+            if (scriptRunner != null)
+                return await RunWithScriptRunnerAsync(scriptRunner, shellPath, writer, cancellationToken);
+
             try
             {
                 var exitCode = await SilentProcessRunner.ExecuteCommandAsync(
@@ -241,6 +262,25 @@ namespace Octopus.Tentacle.Core.Services.Scripts
             catch (Exception ex)
             {
                 writer.WriteOutput(ProcessOutputSource.StdErr, "An exception was thrown when invoking " + shellPath + ": " + ex.Message);
+                writer.WriteOutput(ProcessOutputSource.StdErr, ex.ToString());
+
+                return ScriptExitCodes.PowershellInvocationErrorExitCode;
+            }
+        }
+
+        async Task<int> RunWithScriptRunnerAsync(IScriptRunner runner, string shellPath, IScriptLogWriter writer, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await runner.RunAsync(workspace, shellPath, taskId, environmentVariables, writer, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                writer.WriteOutput(ProcessOutputSource.StdErr, "An exception was thrown when running the script with " + runner.GetType().Name + ": " + ex.Message);
                 writer.WriteOutput(ProcessOutputSource.StdErr, ex.ToString());
 
                 return ScriptExitCodes.PowershellInvocationErrorExitCode;

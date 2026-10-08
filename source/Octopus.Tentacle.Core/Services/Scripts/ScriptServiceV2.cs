@@ -29,6 +29,7 @@ namespace Octopus.Tentacle.Core.Services.Scripts
         readonly ConcurrentDictionary<ScriptTicket, RunningScriptWrapper> runningScripts = new();
         readonly IReadOnlyDictionary<string, string> environmentVariables;
         readonly TimeSpan powerShellStartupTimeout;
+        readonly IScriptRunner? scriptRunner;
 
         public ScriptServiceV2(
             IShell shell,
@@ -37,8 +38,10 @@ namespace Octopus.Tentacle.Core.Services.Scripts
             ScriptIsolationMutex scriptIsolationMutex,
             ISystemLog log, 
             IReadOnlyDictionary<string, string> environmentVariables,
-            TimeSpan powerShellStartupTimeout)
+            TimeSpan powerShellStartupTimeout,
+            IScriptRunner? scriptRunner = null)
         {
+            this.scriptRunner = scriptRunner;
             this.shell = shell;
             this.workspaceFactory = workspaceFactory;
             this.scriptStateStoreFactory = scriptStateStoreFactory;
@@ -54,6 +57,17 @@ namespace Octopus.Tentacle.Core.Services.Scripts
             IScriptStateStoreFactory scriptStateStoreFactory,
             ScriptIsolationMutex scriptIsolationMutex,
             ISystemLog log) : this(shell, workspaceFactory, scriptStateStoreFactory, scriptIsolationMutex, log, new Dictionary<string, string>(), PowerShellStartupDetection.PowerShellStartupTimeout)
+        {
+        }
+
+        // Chosen by Autofac when an IScriptRunner is registered (see the sandbox module).
+        public ScriptServiceV2(
+            IShell shell,
+            IScriptWorkspaceFactory workspaceFactory,
+            IScriptStateStoreFactory scriptStateStoreFactory,
+            ScriptIsolationMutex scriptIsolationMutex,
+            ISystemLog log,
+            IScriptRunner scriptRunner) : this(shell, workspaceFactory, scriptStateStoreFactory, scriptIsolationMutex, log, new Dictionary<string, string>(), PowerShellStartupDetection.PowerShellStartupTimeout, scriptRunner)
         {
         }
 
@@ -155,7 +169,7 @@ namespace Octopus.Tentacle.Core.Services.Scripts
 
         RunningScript LaunchShell(ScriptTicket ticket, string serverTaskId, IScriptWorkspace workspace, IScriptStateStore stateStore, CancellationToken cancellationToken)
         {
-            var runningScript = new RunningScript(shell, workspace, stateStore, workspace.CreateLog(), serverTaskId, scriptIsolationMutex, cancellationToken, environmentVariables, powerShellStartupTimeout, log);
+            var runningScript = new RunningScript(shell, workspace, stateStore, workspace.CreateLog(), serverTaskId, scriptIsolationMutex, cancellationToken, environmentVariables, powerShellStartupTimeout, log, scriptRunner);
             _ = Task.Run(async () => await runningScript.Execute());
             return runningScript;
         }
